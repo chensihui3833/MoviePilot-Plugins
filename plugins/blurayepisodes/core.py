@@ -112,7 +112,7 @@ def read_episode_playlists(xml_path):
     root = ET.fromstring(data)
     episodes = {}
     for entry in root.findall("playlist"):
-        match = re.fullmatch(r"(?:EP\s+|_EP|SEG_EPL_)(\d+)", entry.get("name", ""), re.IGNORECASE)
+        match = re.fullmatch(r"(?:EP\s+|_EP)(\d+)", entry.get("name", ""), re.IGNORECASE)
         if not match:
             continue
         number = int(match[1])
