@@ -221,6 +221,8 @@ def plan_targets(root, offset=0, season=None, runtime_minutes=None,
 
     return SplitPlan(
         root=root,
+        episodes=list(current.episodes),
+        bonus=list(current.bonus),
         warnings=list(current.warnings),
         resolved=[{
             "root": str(item.root),

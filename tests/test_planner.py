@@ -175,15 +175,35 @@ def test_dedup_rule():
           any("12 candidate" in w and "4 episode" in w for w in plan.warnings),
           str([w for w in plan.warnings if "collapsed" in w]))
 
-    # Longest wins inside a group, even when it is not the first name.
-    longest = [
+    # Duplicates are identical clip spans; the first name wins inside a group.
+    # Built from the same interval on purpose -- a real disc repeats one episode
+    # byte-for-byte, so differing spans would mean differing episodes.
+    same_span = [
         make_playlist("00001.mpls", ["00009"], 1000.0),
-        make_playlist("00002.mpls", ["00009"], 1100.0),
-        make_playlist("00003.mpls", ["00009"], 900.0),
+        make_playlist("00002.mpls", ["00009"], 1000.0),
+        make_playlist("00003.mpls", ["00009"], 1000.0),
     ]
-    plan2 = plan_disc(Path("/nonexistent-disc"), playlists=longest)
-    eq("longest duplicate kept", [e.playlist for e in plan2.episodes], ["00002.mpls"])
-    close("longest duplicate duration kept", plan2.episodes[0].duration, 1100.0)
+    for pl in same_span:
+        pl.playitems[0].out_time = int(1000.0 * mpls.TIME_BASE)
+    plan2 = plan_disc(Path("/nonexistent-disc"), playlists=same_span)
+    eq("identical spans collapse to one episode", len(plan2.episodes), 1)
+    eq("first name kept inside a group", [e.playlist for e in plan2.episodes], ["00001.mpls"])
+
+    # Different spans of one clip are different episodes and must survive.
+    # This is the shape that a clip-name-only dedup would silently merge.
+    split = [
+        make_playlist("00001.mpls", ["00009"], 1000.0),
+        make_playlist("00002.mpls", ["00009"], 1000.0),
+    ]
+    split[0].playitems[0].in_time = 0
+    split[0].playitems[0].out_time = int(1000.0 * mpls.TIME_BASE)
+    split[1].playitems[0].in_time = int(5000.0 * mpls.TIME_BASE)
+    split[1].playitems[0].out_time = int(6000.0 * mpls.TIME_BASE)
+    plan3 = plan_disc(Path("/nonexistent-disc"), playlists=split)
+    eq("one clip cut in two stays two episodes", len(plan3.episodes), 2)
+    check("warning names the shared clip",
+          any("00009" in w and "span" in w for w in plan3.warnings),
+          str(plan3.warnings))
 
 
 def test_sort_rule():

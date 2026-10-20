@@ -115,10 +115,60 @@ def _clip_key(playlist):
     return tuple(sorted(playlist.clips))
 
 
-def _order_key(playlist):
-    """Sort key. Clip names only -- duration ordering is provably wrong."""
+def _span_key(playlist):
+    """Identity including in/out points, so one clip cut into two stays two.
+
+    The same episode routinely shows up on three playlists pointing at one
+    clip, but a disc can also carve several episodes out of a single clip at
+    different offsets. Only the interval tells those apart.
+    """
+    spans = []
+    for item in playlist.playitems:
+        spans.append((item.clip, int(item.in_time), int(item.out_time)))
+    if not spans:
+        return tuple(sorted(playlist.clips))
+    return tuple(sorted(spans))
+
+
+_MTIME_CACHE = {}
+
+
+def _clip_mtime(stream_dir, clip):
+    """mtime of one STREAM clip, or None when it cannot be stat'ed."""
+    if stream_dir is None:
+        return None
+    key = (str(stream_dir), clip)
+    if key in _MTIME_CACHE:
+        return _MTIME_CACHE[key]
+    value = None
+    for suffix in (".m2ts", ""):
+        try:
+            value = (Path(stream_dir) / (clip + suffix)).stat().st_mtime
+            break
+        except OSError:
+            continue
+    _MTIME_CACHE[key] = value
+    return value
+
+
+def _order_key(playlist, stream_dir=None):
+    """Sort key: the physical write order of the clips.
+
+    Blu-ray authoring writes the STREAM clips in playback order, so the mtime
+    of an episode's first clip is its authoring order. Unlike the clip number
+    it survives non-contiguous numbering, and unlike the runtime it survives
+    episodes whose lengths are not monotonic. Clip name stays as tie-breaker
+    and as the fallback when stat is unavailable.
+    """
+    stamps = []
+    for clip in playlist.clips:
+        stamp = _clip_mtime(stream_dir, clip)
+        if stamp is not None:
+            stamps.append(stamp)
     first = playlist.clips[0] if playlist.clips else ""
-    return (tuple(sorted(playlist.clips)), first)
+    if not stamps:
+        return (1, 0.0, tuple(sorted(playlist.clips)), first)
+    return (0, min(stamps), tuple(sorted(playlist.clips)), first)
 
 
 def plan_disc(
@@ -138,8 +188,11 @@ def plan_disc(
     that would be silent data loss).
 
     large_clip_count is the number of >1 GiB m2ts files, supplied by the caller.
-    It is used only for a cross-check warning -- never to decide episodes, and
-    this function never stats STREAM itself.
+    It is used only for a cross-check warning -- never to decide episodes.
+
+    The only filesystem access is stat() on STREAM clips, done solely to read
+    their write order; nothing is written and a missing STREAM simply falls
+    back to clip-name ordering.
     """
     root = Path(bluray_root)
 
@@ -154,6 +207,12 @@ def plan_disc(
 
     plan = DiscPlan(root=root)
     warnings = plan.warnings
+
+    # The STREAM directory is where the clip write order lives; it is resolved
+    # once here so the ordering rule can stat clips without guessing paths.
+    stream_dir = root / "BDMV" / "STREAM"
+    if not stream_dir.is_dir():
+        stream_dir = None
 
     try:
         meta = read_disc_meta(root)
@@ -187,11 +246,13 @@ def plan_disc(
                 continue
         candidates.append(pl)
 
-    # Rule 4: identical clip sets are the same episode, duplicated once per
-    # playback path. Keep the longest, drop the rest.
+    # Rule 4: two playlists are the same episode only when they play the very
+    # same clip *intervals*. Matching on the clip names alone would merge two
+    # episodes cut from different parts of one clip, so the in/out points are
+    # part of the identity.
     groups = {}
     for pl in candidates:
-        groups.setdefault(_clip_key(pl), []).append(pl)
+        groups.setdefault(_span_key(pl), []).append(pl)
 
     kept = []
     dropped = 0
@@ -201,17 +262,32 @@ def plan_disc(
         for dup in group[1:]:
             dropped += 1
             warnings.append(
-                "duplicate playlist %s dropped: same clip set as %s"
+                "duplicate playlist %s dropped: same clip span as %s"
                 % (dup.name, group[0].name)
             )
     if dropped:
         warnings.append(
-            "%d candidate playlist(s) collapsed to %d episode(s) after clip-set dedup"
+            "%d candidate playlist(s) collapsed to %d episode(s) after clip-span dedup"
             % (len(candidates), len(kept))
         )
 
-    # Rule 5: order by clip name. Sorting by duration is provably wrong.
-    kept.sort(key=_order_key)
+    # Two different episodes carved out of one clip share the clip name but not
+    # the interval. Say so, because that shape is common on TV Blu-rays and a
+    # silent merge there loses episodes.
+    by_clip = {}
+    for pl in kept:
+        for clip in pl.clips:
+            by_clip.setdefault(clip, set()).add(_span_key(pl))
+    shared = sorted(clip for clip, spans in by_clip.items() if len(spans) > 1)
+    if shared:
+        warnings.append(
+            "clip(s) %s carry more than one distinct span; kept separately"
+            % ", ".join(shared)
+        )
+
+    # Rule 5: order by the physical clip write order. Sorting by duration is
+    # provably wrong; clip numbers are only a proxy for the same thing.
+    kept.sort(key=lambda pl: _order_key(pl, stream_dir))
 
     for position, pl in enumerate(kept, start=1):
         plan.episodes.append(
@@ -257,7 +333,7 @@ def plan_disc(
     for group in bonus_groups.values():
         group.sort(key=lambda pl: (-pl.duration, pl.name))
         bonus_kept.append(group[0])
-    bonus_kept.sort(key=_order_key)
+    bonus_kept.sort(key=lambda pl: _order_key(pl, stream_dir))
 
     for pl in bonus_kept:
         plan.bonus.append(

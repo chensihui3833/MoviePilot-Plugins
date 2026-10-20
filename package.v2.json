@@ -3,12 +3,13 @@
     "name": "蓝光原盘分集",
     "description": "解析 BDMV 播放列表，把蓝光原盘电视剧按集拆成独立目录，接入 MoviePilot 自动与手动整理。",
     "labels": "BDMV,电视剧,蓝光,硬链接",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "icon": "",
     "author": "chensihui3833",
     "level": 1,
     "history": {
-      "v0.1.1": "改用 plugins.v2 布局，修复插件源码目录不存在"
+      "v0.1.1": "改用 plugins.v2 布局，修复插件源码目录不存在",
+      "v0.2.0": "按 STREAM 写入顺序定集序；同一 clip 不同区间不再误并；修复 v2 布局漏同步入口修复"
     }
   }
 }
