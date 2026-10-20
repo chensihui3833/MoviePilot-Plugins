@@ -70,6 +70,64 @@ class CoreTest(unittest.TestCase):
         return {str(p.relative_to(self.source)): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in self.source.rglob("*") if p.is_file()}
 
+    def use_button_menu(self):
+        for disc in sorted(self.source.glob("DISC*")):
+            with zipfile.ZipFile(disc / "BDMV/JAR/00002.jar", "w") as archive:
+                archive.writestr("eng/tblEP_res.qct", b"QCTF\0TITLE\0EPISODE SELECTIONS\0"
+                                 + b"".join(f"BUTTON_{i:02}\0{title}\0".encode()
+                                            for i, title in enumerate(self.title_names)))
+            xml_path = disc / "BDMV/JAR/00002/playlists.xml"
+            tree = ET.parse(xml_path)
+            for entry in tree.findall("playlist"):
+                if entry.get("name").startswith("EP "):
+                    entry.set("name", entry.get("name").replace("EP ", "_EP"))
+            for name in ("EP1_A", "EP1_B", "Dub Credit EP1 FRA"):
+                ET.SubElement(tree.getroot(), "playlist", name=name,
+                              id="00998", duration_ms="60000")
+            tree.write(xml_path)
+
+    def test_button_menu_thirteen_episodes_four_discs(self):
+        self.title_names = [f"TITLE {i}" for i in range(1, 14)]
+        for disc, count in enumerate((4, 3, 3, 3), 1):
+            self.make_disc(disc, [(i, f"{333+i:05}", f"{333+i:05}")
+                                  for i in range(1, count + 1)])
+        self.use_button_menu()
+        before = self.source_hashes()
+        plan = self.scan(season=2)
+        self.assertEqual([r["episode"] for r in plan["episodes"]], list(range(1, 14)))
+        self.assertEqual([r["disc"] for r in plan["episodes"]], [1]*4+[2]*3+[3]*3+[4]*3)
+        self.assertEqual([r["title"] for r in plan["episodes"]], self.title_names)
+        core.export_plan(plan, plan["fingerprint"])
+        self.assertEqual(len(list(Path(plan["output"]).rglob("*.m2ts"))), 13)
+        self.assertEqual(before, self.source_hashes())
+
+    def test_button_menu_missing_duplicate_or_empty_title_rejected(self):
+        jar = self.source / "DISC1/BDMV/JAR/00002.jar"
+        for data in (b"BUTTON_01\0SECOND\0",
+                     b"BUTTON_00\0FIRST\0BUTTON_02\0THIRD\0",
+                     b"BUTTON_00\0FIRST\0BUTTON_00\0SECOND\0",
+                     b"BUTTON_00\0\0"):
+            with zipfile.ZipFile(jar, "w") as archive:
+                archive.writestr("eng/tblEP_res.qct", b"QCTF\0" + data)
+            with self.assertRaises(core.NeedsReview):
+                core.read_titles(jar)
+
+    def test_conflicting_menu_formats_rejected(self):
+        jar = self.source / "DISC1/BDMV/JAR/00002.jar"
+        with zipfile.ZipFile(jar, "a") as archive:
+            archive.writestr("eng/tblEP_res.qct", b"QCTF\0BUTTON_00\0WRONG\0")
+        with self.assertRaises(core.NeedsReview):
+            core.read_titles(jar)
+
+    def test_duplicate_primary_episode_formats_rejected(self):
+        xml_path = self.source / "DISC1/BDMV/JAR/00002/playlists.xml"
+        tree = ET.parse(xml_path)
+        ET.SubElement(tree.getroot(), "playlist", name="_EP1", id="00334",
+                      duration_ms="60000")
+        tree.write(xml_path)
+        with self.assertRaises(core.NeedsReview):
+            core.read_episode_playlists(xml_path)
+
     def test_uses_menu_order_not_playlist_filename_and_deduplicates(self):
         before = self.source_hashes()
         plan = self.scan()

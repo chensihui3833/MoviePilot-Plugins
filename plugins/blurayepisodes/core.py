@@ -61,16 +61,33 @@ def playlist_items(data):
 
 def read_titles(jar):
     titles = {}
+    button_titles = None
     with zipfile.ZipFile(jar) as archive:
         for info in archive.infolist():
             match = re.fullmatch(r"eng/tblEP_T3_(\d{2,3})_res\.qct", info.filename)
-            if not match:
+            is_button_table = info.filename == "eng/tblEP_res.qct"
+            if not match and not is_button_table:
                 continue
             if info.file_size > 65536 or info.compress_size > 65536:
                 raise NeedsReview("菜单标题资源大小异常")
             data = archive.read(info)
             if not data.startswith(b"QCTF"):
                 raise NeedsReview("菜单标题资源格式不受支持")
+            if is_button_table:
+                if button_titles is not None:
+                    raise NeedsReview("整季按钮标题表重复")
+                button_titles = {}
+                buttons = re.findall(rb"(?:^|\x00)BUTTON_(\d+)\x00([^\x00]*)(?=\x00)", data)
+                for raw_number, raw_title in buttons:
+                    number = int(raw_number) + 1
+                    title = " ".join(raw_title.decode("utf-8").split())
+                    if not title or number in button_titles:
+                        raise NeedsReview("按钮标题为空或菜单集号重复")
+                    button_titles[number] = title
+                if (not button_titles or sorted(button_titles)
+                        != list(range(1, len(button_titles) + 1))):
+                    raise NeedsReview("按钮标题表必须从 BUTTON_00 开始连续")
+                continue
             matches = re.findall(rb"(?:^|\x00)TITLE\x00([^\x00]+)\x00Menu Title\x00", data)
             if len(matches) != 1:
                 raise NeedsReview("菜单资源没有唯一、明确的标题")
@@ -79,6 +96,10 @@ def read_titles(jar):
             if not title or number in titles:
                 raise NeedsReview("标题为空或菜单集号重复")
             titles[number] = title
+    if button_titles is not None:
+        if titles and titles != button_titles:
+            raise NeedsReview("两种菜单标题表不一致")
+        titles = button_titles
     if not titles or sorted(titles) != list(range(1, len(titles) + 1)):
         raise NeedsReview("没有连续、完整的英文菜单标题表")
     return titles
@@ -91,7 +112,7 @@ def read_episode_playlists(xml_path):
     root = ET.fromstring(data)
     episodes = {}
     for entry in root.findall("playlist"):
-        match = re.fullmatch(r"EP\s+(\d+)", entry.get("name", ""), re.IGNORECASE)
+        match = re.fullmatch(r"(?:EP\s+|_EP)(\d+)", entry.get("name", ""), re.IGNORECASE)
         if not match:
             continue
         number = int(match[1])
