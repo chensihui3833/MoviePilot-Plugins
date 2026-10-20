@@ -33,6 +33,11 @@ with patch.dict(sys.modules, {"app.sdk.plugin": fake_sdk, "blurayepisodes": adap
 
 
 class AdapterTest(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(adapter, "install_path_adapter", return_value=lambda: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_toggle_does_not_start_work(self):
         plugin = adapter.BlurayEpisodes()
         with patch.object(adapter, "native_transfer") as transfer:
