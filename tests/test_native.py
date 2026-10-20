@@ -57,6 +57,7 @@ class NativeTest(unittest.TestCase):
         options = dict(target_path=self.out, preview=False)
         options.update(kwargs)
         with patch.dict(sys.modules, self.host), \
+             patch.object(native_core, "read_navigation", side_effect=test_core.fixture_navigation), \
              patch.object(native_core.shutil, "which", return_value="stub"), \
              patch.object(native_core, "probe_video", return_value=(524280 / 45000, 60)):
             return native.native_transfer(self.plugin, self.file, self.meta, self.media, **options)

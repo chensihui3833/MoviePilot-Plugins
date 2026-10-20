@@ -64,7 +64,7 @@ def prepare_native_plan(fileitem, meta, mediainfo, destination, recommend_name,
     # Existing show NFO belongs to the host; never replace it.
     plan["write_tvshow"] = False
     plan["preserve_enriched_nfo"] = True
-    plan["mapping_basis"] = "完整盘序、盘内 EP、整季标题表和视频时长已核对；沿用 MoviePilot 命名"
+    plan["mapping_basis"] += "；沿用 MoviePilot 命名"
     plan["fingerprint"] = hashlib.sha256(
         json.dumps({k: v for k, v in plan.items() if k != "fingerprint"},
                    sort_keys=True, ensure_ascii=False).encode("utf-8")

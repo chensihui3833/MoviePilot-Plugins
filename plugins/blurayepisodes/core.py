@@ -12,9 +12,19 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+from . import onq
+
 
 class NeedsReview(ValueError):
     pass
+
+
+def read_navigation(jar):
+    try:
+        return onq.read_navigation(jar)
+    except (ValueError, KeyError, IndexError, TypeError, struct.error,
+            UnicodeError, zipfile.BadZipFile, StopIteration) as exc:
+        raise NeedsReview(f"无法从菜单脚本确认分集关系，停止整理：{exc}") from exc
 
 
 def bounded_read(path, limit):
@@ -176,31 +186,49 @@ def scan_season(source_dir, series, season, output_root, tmdb_id="", ffprobe=Non
     if not discs or sorted(discs) != list(range(1, len(discs) + 1)):
         raise NeedsReview("请选择完整一季：盘号必须从 DISC1 开始连续，不能缺盘")
     all_titles = None
+    disc_counts = None
     rows = []
     evidence = []
+    navigation = []
     for disc_number, disc in sorted(discs.items()):
         jar = inside(disc / "BDMV/JAR/00002.jar", source)
-        xml = inside(disc / "BDMV/JAR/00002/playlists.xml", source)
         if jar.stat().st_size > 32 * 1024 * 1024:
             raise NeedsReview("菜单 JAR 超过首版解析大小限制")
-        titles = read_titles(jar)
+        menu = read_navigation(jar)
+        titles = dict(enumerate(menu["titles"], 1))
+        if menu["disc"] != disc_number or len(menu["counts"]) != len(discs):
+            raise NeedsReview("目录盘号或盘数与菜单程序中的盘号、盘数不一致")
         if all_titles is None:
             all_titles = titles
+            disc_counts = menu["counts"]
         elif titles != all_titles:
             raise NeedsReview("各盘没有一致的整季标题表，不能按整季顺序自动对应")
-        for path in (jar, xml):
-            evidence.append(hashlib.sha256(bounded_read(path, 32 * 1024 * 1024)).hexdigest())
-        for local_episode, (pid, xml_duration) in sorted(read_episode_playlists(xml).items()):
-            mpls = inside(disc / "BDMV/PLAYLIST" / (pid + ".mpls"), source)
-            blob = bounded_read(mpls, 8 * 1024 * 1024)
-            evidence.append(hashlib.sha256(blob).hexdigest())
-            clips = playlist_items(blob)
+        if menu["counts"] != disc_counts or len(menu["episodes"]) != disc_counts[disc_number - 1]:
+            raise NeedsReview("各盘菜单中的集数分配不一致")
+        evidence.append(hashlib.sha256(bounded_read(jar, 32 * 1024 * 1024)).hexdigest())
+        navigation.append(menu["evidence"])
+        for local_episode, episode in enumerate(menu["episodes"], 1):
+            if episode["episode"] != len(rows) + 1 or episode["title"] != titles[len(rows) + 1]:
+                raise NeedsReview("菜单集号、标题与播放顺序不一致")
+            variants = {}
+            for region, uri in episode["variants"].items():
+                match = re.fullmatch(r"bd://PLAYLIST:(\d{5})\.ITEM:0\.V1:1", uri)
+                if not match:
+                    raise NeedsReview("不支持的菜单视频资源地址")
+                pid = match[1]
+                mpls = inside(disc / "BDMV/PLAYLIST" / (pid + ".mpls"), source)
+                blob = bounded_read(mpls, 8 * 1024 * 1024)
+                evidence.append(hashlib.sha256(blob).hexdigest())
+                variants[region] = (pid, playlist_items(blob))
+            if not variants:
+                raise NeedsReview("菜单没有可确认的正片播放列表")
+            pid, clips = next(iter(variants.values()))
+            if any(items != clips for _, items in variants.values()):
+                raise NeedsReview("区域版本指向不同视频或时间范围，需要人工核对")
             if len(clips) != 1:
                 raise NeedsReview(f"第 {disc_number} 盘 EP {local_episode} 由多个片段组成，首版暂不导出")
             clip = clips[0]
             duration = clip["out"] - clip["in"]
-            if abs(duration - xml_duration) > 1:
-                raise NeedsReview("菜单时长与实际播放列表不一致")
             video = inside(disc / "BDMV/STREAM" / (clip["clip"] + ".m2ts"), source)
             start, video_duration = probe_video(video, executable)
             if not all(math.isfinite(v) for v in (start, video_duration)) or abs(start - clip["in"]) > 0.5 or abs(start + video_duration - clip["out"]) > 0.5:
@@ -221,11 +249,12 @@ def scan_season(source_dir, series, season, output_root, tmdb_id="", ffprobe=Non
     for row in rows:
         row["title"] = all_titles[row["episode"]]
     plan = {
-        "format": "sony-onq-complete-season-hardlink-v1", "source": str(source),
+        "format": "onq-static-navigation-hardlink-v2", "source": str(source),
         "series": series.strip(), "season": season, "tmdb_id": str(tmdb_id),
         "output": str(output / series.strip()), "episodes": rows,
         "evidence": evidence,
-        "mapping_basis": "完整连续盘序 + 每盘 EP 顺序 + 所有盘一致的整季标题表；导出前请核对预览",
+        "navigation": navigation,
+        "mapping_basis": "菜单按钮与播放函数使用同一集号；按脚本盘号、集数表、区域状态表解析，核对实际视频完整范围",
     }
     plan["fingerprint"] = hashlib.sha256(
         json.dumps(plan, sort_keys=True, ensure_ascii=False).encode("utf-8")

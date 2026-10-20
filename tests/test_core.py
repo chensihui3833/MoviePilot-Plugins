@@ -2,19 +2,43 @@ import hashlib
 import importlib.util
 import json
 import struct
+import sys
 import tempfile
+import types
 import unittest
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+package = types.ModuleType("core_test_package")
+package.__path__ = [str(Path(__file__).parents[1] / "plugins/blurayepisodes")]
+sys.modules[package.__name__] = package
 SPEC = importlib.util.spec_from_file_location(
-    "core", Path(__file__).parents[1] / "plugins/blurayepisodes/core.py"
+    "core_test_package.core", Path(__file__).parents[1] / "plugins/blurayepisodes/core.py"
 )
 core = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(core)
 
+
+def fixture_navigation(jar):
+    """Isolate export/provider tests from the independently tested menu parser."""
+    source = jar.parents[3]
+    discs = sorted(source.glob("DISC*"))
+    counts = [len(core.read_episode_playlists(d / "BDMV/JAR/00002/playlists.xml"))
+              for d in discs]
+    number = discs.index(jar.parents[1].parent) + 1
+    titles = list(core.read_titles(jar).values())
+    playlists = core.read_episode_playlists(jar.parent / "00002/playlists.xml")
+    offset = sum(counts[:number - 1])
+    if len(titles) != sum(counts):
+        raise core.NeedsReview("fixture title count mismatch")
+    return {
+        "disc": number, "counts": counts, "titles": titles, "evidence": {},
+        "episodes": [{"episode": offset + local, "title": titles[offset + local - 1],
+                      "variants": {"A": f"bd://PLAYLIST:{pid}.ITEM:0.V1:1"}}
+                     for local, (pid, _) in sorted(playlists.items())],
+    }
 
 def mpls(clip="00334", multi=False, count=1):
     payload = clip.encode() + b"M2TS" + struct.pack(">H", 0x10 if multi else 1) + b"\0"
@@ -34,8 +58,11 @@ class CoreTest(unittest.TestCase):
         self.title_names = ["PILOT", "SEE", "THIRD & FINAL"]
         self.make_disc(1, [(1, "00362", "00348"), (2, "00335", "00335")])
         self.make_disc(2, [(1, "00334", "00334")])
+        self.navigation_patch = patch.object(core, "read_navigation", side_effect=fixture_navigation)
+        self.navigation_patch.start()
 
     def tearDown(self):
+        self.navigation_patch.stop()
         self.temp.cleanup()
 
     def make_disc(self, number, items, titles=None):
@@ -210,6 +237,20 @@ class CoreTest(unittest.TestCase):
         path.write_bytes(mpls("00348", count=2))
         with self.assertRaises(core.NeedsReview):
             self.scan()
+
+    def test_different_region_video_stops_before_export(self):
+        (self.source / "DISC1/BDMV/PLAYLIST/00999.mpls").write_bytes(mpls("00999"))
+
+        def region_conflict(jar):
+            menu = fixture_navigation(jar)
+            if menu["disc"] == 1:
+                menu["episodes"][0]["variants"]["B"] = "bd://PLAYLIST:00999.ITEM:0.V1:1"
+            return menu
+
+        with patch.object(core, "read_navigation", side_effect=region_conflict):
+            with self.assertRaisesRegex(core.NeedsReview, "区域版本"):
+                self.scan()
+        self.assertFalse(self.out.exists())
 
     def test_multi_angle_and_truncated_playlist_rejected(self):
         for data in (mpls(multi=True), mpls()[:-1], b"MPLS"):
