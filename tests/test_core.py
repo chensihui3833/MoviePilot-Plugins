@@ -112,6 +112,41 @@ class CoreTest(unittest.TestCase):
             with self.assertRaises(core.NeedsReview):
                 core.read_titles(jar)
 
+    def test_segment_episode_names_ten_episodes_three_discs(self):
+        self.title_names = [f"TITLE {i}" for i in range(1, 11)]
+        for disc, count in enumerate((4, 3, 3), 1):
+            self.make_disc(disc, [(i, f"{334+i:05}", f"{334+i:05}")
+                                  for i in range(1, count + 1)])
+            xml_path = self.source / f"DISC{disc}/BDMV/JAR/00002/playlists.xml"
+            tree = ET.parse(xml_path)
+            for entry in tree.findall("playlist"):
+                if entry.get("name").startswith("EP "):
+                    entry.set("name", f"SEG_EPL_{int(entry.get('name')[3:]):02}")
+            for name in ("EPL_01_A", "EPL_01_B", "_Dub Credit Ep01 FRA",
+                         "SEG_EPL_01_A", "SEG_EPL_01_EXTRA"):
+                ET.SubElement(tree.getroot(), "playlist", name=name,
+                              id="00998", duration_ms="60000")
+            tree.write(xml_path)
+        before = self.source_hashes()
+        plan = self.scan(season=3)
+        self.assertEqual([r["episode"] for r in plan["episodes"]], list(range(1, 11)))
+        self.assertEqual([r["disc"] for r in plan["episodes"]], [1]*4+[2]*3+[3]*3)
+        self.assertEqual([r["title"] for r in plan["episodes"]], self.title_names)
+        core.export_plan(plan, plan["fingerprint"])
+        self.assertEqual(len(list(Path(plan["output"]).rglob("*.m2ts"))), 10)
+        self.assertEqual(before, self.source_hashes())
+
+    def test_segment_names_still_reject_duplicate_or_missing_episode(self):
+        path = self.source / "DISC1/BDMV/JAR/00002/playlists.xml"
+        for names in (("SEG_EPL_01", "SEG_EPL_03"), ("EP 1", "SEG_EPL_01")):
+            root = ET.Element("playlist-metadata")
+            for name in names:
+                ET.SubElement(root, "playlist", name=name, id="00335",
+                              duration_ms="60000")
+            ET.ElementTree(root).write(path)
+            with self.assertRaises(core.NeedsReview):
+                core.read_episode_playlists(path)
+
     def test_conflicting_menu_formats_rejected(self):
         jar = self.source / "DISC1/BDMV/JAR/00002.jar"
         with zipfile.ZipFile(jar, "a") as archive:

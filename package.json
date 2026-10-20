@@ -2,7 +2,7 @@
   "BlurayEpisodes": {
     "name": "蓝光电视剧分集",
     "description": "接入 MoviePilot 自动和手动整理，将支持的电视剧 BDMV 生成逐集硬链接及 NFO。",
-    "version": "0.2.3",
+    "version": "0.2.4",
     "author": "chensihui3833",
     "level": 1,
     "order": 50,
