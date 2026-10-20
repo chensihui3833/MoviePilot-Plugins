@@ -3,6 +3,7 @@ import zipfile
 from urllib.parse import urlsplit
 from pathlib import Path
 from .onq_binary import globals_and_functions, instructions, resources, table, require
+from . import onq_flow as flow
 
 
 class MenuArchive:
@@ -40,6 +41,7 @@ class Program:
 
     def __init__(self, data):
         self.variables, self.functions, self.locals, self.objects = ({}, {}, {}, {})
+        self._flows = {}
         for screen in (False, True):
             variables, code, offsets, objects = globals_and_functions(data, screen, True)
             self.variables.update(variables)
@@ -49,16 +51,21 @@ class Program:
                 self.functions[ident] = instructions(code, start, offsets[i + 1] if i + 1 < len(offsets) else len(code))
             self.objects.update({o['id']: o for o in objects})
 
-    def find(self, marker):
-        found = [ident for ident, code in self.functions.items() if any((ins[1:] == ['push_string', marker] for ins in code))]
-        require(len(found) == 1, (marker, found))
-        return found[0]
-
     def value(self, ident):
         return self.variables[ident & 65535]['value']
 
     def references(self, code, operation):
-        return list(dict.fromkeys((code[i - 1][2] & 65535 for i, ins in enumerate(code) if i and ins[1] == operation and (code[i - 1][1] in PUSH))))
+        kind = "global" if operation == "global_get" else "array"
+        return list(dict.fromkeys(e[2] for e in self.effects(code)
+                                  if e[0] == kind and e[2] is not None
+                                  and (kind == "global" or e[3][0] ==
+                                       ("array2" if operation == "array2_get" else "array"))))
+
+    def effects(self, code):
+        key = id(code)
+        if key not in self._flows:
+            self._flows[key] = flow.analyze(code)
+        return self._flows[key]
 
     def pure(self, ident, args=(), overrides=None):
         """Evaluate only arithmetic/data access; unknown instructions fail closed."""
@@ -76,6 +83,8 @@ class Program:
             pc += 1
             if op in PUSH:
                 stack.append(vals[0])
+            elif op == 'nop':
+                pass
             elif op == 'local_get':
                 stack.append(local[vals[0]])
             elif op == 'local_set':
@@ -91,9 +100,9 @@ class Program:
                 stack[-1] = array['values'][stack[-1]]
             elif op == 'not':
                 stack[-1] = int(not stack[-1])
-            elif op in ('add', 'sub', 'lt', 'le', 'gt', 'ge', 'eq', 'ne'):
+            elif op in ('add', 'sub', 'mul', 'lt', 'le', 'gt', 'ge', 'eq', 'ne'):
                 right, left = (stack.pop(), stack.pop())
-                value = {'add': lambda: left + right, 'sub': lambda: left - right, 'lt': lambda: left < right, 'le': lambda: left <= right, 'gt': lambda: left > right, 'ge': lambda: left >= right, 'eq': lambda: left == right, 'ne': lambda: left != right}[op]()
+                value = {'add': lambda: left + right, 'sub': lambda: left - right, 'mul': lambda: left * right, 'lt': lambda: left < right, 'le': lambda: left <= right, 'gt': lambda: left > right, 'ge': lambda: left >= right, 'eq': lambda: left == right, 'ne': lambda: left != right}[op]()
                 stack.append(int(value))
             elif op == 'result_set':
                 result = stack.pop()
@@ -109,45 +118,86 @@ class Program:
                 raise ValueError(('not a pure expression', ident, at, op))
         raise ValueError('no return')
 
+def playback_dependencies(value):
+    """Require every merged path to retain the same episode and region sources."""
+    if value[0] == "choice":
+        alternatives = [playback_dependencies(v) for v in value[1:]]
+        return alternatives[0] if all(v == alternatives[0] for v in alternatives) else None
+    if value[0] != "add":
+        return None
+    terms = value[1:]
+    calls = [t for t in terms if t[0] == "call"]
+    globals_ = [t for t in terms if t[0] == "global"]
+    if len(calls) != 1 or len(globals_) != 1:
+        return None
+    call = calls[0]
+    if len(call) != 3 or call[2][0] != "local":
+        return None
+    extra = [t for t in terms if t not in (call, globals_[0])]
+    if any(flow.nodes(t, "unknown") or flow.nodes(t, "const") or call[2] in flow.nodes(t, "local")
+           for t in extra):
+        return None
+    return call, globals_[0]
+
+
+def episode_flow(p):
+    """Locate the verified arithmetic/data flow, without diagnostics or symbol names."""
+    matches = {}
+    for play, code in p.functions.items():
+        effects = p.effects(code)
+        if any(e[0] == "unsupported" or (e[0] == "write" and e[2] is None)
+               for e in effects):
+            continue
+        for event in effects:
+            if event[0] != "write" or event[2] is None:
+                continue
+            dependencies = playback_dependencies(event[3])
+            if not dependencies:
+                continue
+            # A later/alternative write to the same state must not contradict it.
+            if any(playback_dependencies(e[3]) != dependencies for e in effects
+                   if e[0] == "write" and e[2] == event[2]):
+                continue
+            call, region = dependencies
+            translator = call[1]
+            if translator not in p.functions:
+                continue
+            count_arrays = p.references(p.functions[translator], "array_get")
+            if len(count_arrays) != 1:
+                continue
+            count_id = count_arrays[0]
+            try:
+                counts = list(p.value(count_id)["values"])
+                while counts and counts[-1] == 0:
+                    counts.pop()
+                if not (counts and len(counts) <= 100 and all(0 < n <= 100 for n in counts)
+                        and sum(counts) <= 1000):
+                    continue
+                actual = [p.pure(translator, [e]) for e in range(sum(counts))]
+                if actual != [e for count in counts for e in range(count)]:
+                    continue
+            except (ValueError, IndexError, KeyError, TypeError):
+                continue
+            key = (play, translator, count_id, region[1], event[2])
+            matches[key] = (play, translator, count_id, counts, region[1], event[2])
+    require(len(matches) == 1, "无法唯一证明盘内集号到播放状态的计算关系")
+    return next(iter(matches.values()))
+
+
 def analyze(source):
     res = source.resources
     scripts = [r for r in res if r['type'] == 3]
     require(len(scripts) == 1, 'menu script selection')
     p = Program(source.read_resource(scripts[0]['uri']))
-    play = p.find('playEpisode(epID = ')
-    code = p.functions[play]
-    first_call = next((i for i, ins in enumerate(code) if ins[1] == 'call'))
-    translator = code[first_call - 1][2]
-    require(code[first_call + 1][1] == "result_get"
-            and code[first_call + 2][1] == "local_set", "无法追踪盘内集号计算结果")
-    translated_local = code[first_call + 2][2]
-    state_assignments = []
-    for i in range(len(code) - 7):
-        seq = code[i:i + 8]
-        if ([r[1] for r in seq] == ["local_get", "push_i16", "global_get", "add",
-                                   "local_get", "add", "push_i16", "global_set"]
-                and seq[0][2] == translated_local):
-            state_assignments.append((seq[1][2], seq[6][2]))
-    require(len(state_assignments) == 1, "无法确认集号与区域状态的对应")
-    region_variable, episode_variable = state_assignments[0]
-    translate_code = p.functions[translator]
-    count_arrays = p.references(translate_code, 'array_get')
-    require(len(count_arrays) == 1, 'unrecognized menu structure')
-    count_id = count_arrays[0]
-    counts = p.value(count_id)['values']
-    while counts and counts[-1] == 0:
-        counts = counts[:-1]
-    require(counts and len(counts) <= 100 and all(0 < n <= 100 for n in counts)
-            and sum(counts) <= 1000, "盘内集数表无效")
-    require([p.pure(translator, [e]) for e in range(sum(counts))] == [e for count in counts for e in range(count)], 'unrecognized menu structure')
+    play, translator, count_id, counts, region_variable, episode_variable = episode_flow(p)
     offsets = []
     for ident, body in p.functions.items():
-        if p.references(body, 'array_get') != [count_id] or 'sub' not in [ins[1] for ins in body]:
+        if p.references(body, 'array_get') != [count_id]:
             continue
         reads = p.references(body, 'global_get')
-        if len(reads) != 2:
-            continue
         for disc_id in reads:
+            if not isinstance(p.value(disc_id), int):
+                continue
             try:
                 results = [p.pure(ident, overrides={disc_id: d}) for d in range(1, len(counts) + 1)]
             except (ValueError, AssertionError, IndexError, KeyError):
@@ -159,69 +209,68 @@ def analyze(source):
     disc_number = p.value(disc_id)
     require(1 <= disc_number <= len(counts), 'unrecognized menu structure')
     offset = p.pure(offset_func)
-    callers = []
+    callers = set()
     for ident, body in p.functions.items():
-        for i, ins in enumerate(body):
-            if i >= 3 and ins[1:] == ['call', 3] and (body[i - 1][1] in PUSH) and (body[i - 1][2] == play) and (body[i - 2][1] == 'global_get'):
-                callers.append((ident, body[i - 3][2]))
+        for event in p.effects(body):
+            if (event[0] == "call" and event[2] == play and len(event[3]) == 3
+                    and event[3][-1][0] == "global"):
+                callers.add((ident, event[3][-1][1]))
     require(len(callers) == 1, callers)
-    caller, selected = callers[0]
-    title_bindings = []
+    caller, selected = next(iter(callers))
+    title_bindings = set()
     for obj in p.objects.values():
         for event, _, function in obj['events']:
             if event != 31 or function not in p.functions:
                 continue
-            body = p.functions[function]
-            for i in range(len(body) - 5):
-                seq = body[i:i + 6]
-                if seq[0][1] in PUSH and seq[0][2] == selected and ([v[1] for v in seq[1:]] == ['global_get', 'push_u8', 'add', 'push_i16', 'object_call']) and (seq[2][2] == 1) and (seq[5][2:] == [1, 2]):
-                    target = p.objects[seq[4][2]]
+            for binding in p.effects(p.functions[function]):
+                if (binding[0] == "object" and binding[3] == 1 and len(binding[4]) == 2
+                        and binding[4][-1] ==
+                        flow.arithmetic("add", ("global", selected), flow.const(1))):
+                    target = p.objects.get(binding[2])
+                    if not target or target["type"] != 8:
+                        continue
                     resource_id = int(target['data'][-4:], 16)
                     if resource_id:
-                        title_bindings.append((function, resource_id))
+                        title_bindings.add((function, resource_id))
     require(len(title_bindings) == 1, title_bindings)
-    title_resource = res[title_bindings[0][1] - 1]
+    title_binding = next(iter(title_bindings))
+    title_resource = res[title_binding[1] - 1]
     title_table = table(source.read_resource(title_resource['uri']))
     titles = [' '.join(row[1].split()) for row in title_table[1:]]
     require(len(titles) == sum(counts), 'unrecognized menu structure')
-    require([r[0] for r in title_table[1:]] == [f'BUTTON_{i:02d}' for i in range(len(titles))], 'unrecognized menu structure')
-    store = p.find('storeEpisodePlaylists()')
-    seqvars = p.references(p.functions[store], 'array2_get')
-    require(len(seqvars) == 1, 'unrecognized menu structure')
-    states = p.value(seqvars[0])['values']
-    render = p.find("VideoSequencer.playEpisode()")
-    require(p.references(p.functions[render], "array2_get") == seqvars,
-            "播放函数没有使用同一份分集状态表")
-    render_code = p.functions[render]
-    require(any([r[1] for r in render_code[i:i + 5]] ==
-                ["push_i16", "global_get", "push_u8", "push_i16", "array2_get"]
-                and render_code[i][2] == episode_variable
-                and render_code[i + 2][2] == 0
-                and render_code[i + 3][2] == seqvars[0]
-                for i in range(len(render_code) - 4)),
-            "播放状态没有使用菜单传入的集号")
-    state_objects = []
-    body = p.functions[store]
-    for i, ins in enumerate(body):
-        if i >= 2 and ins[1:] == ['call', 4] and (body[i - 2][1] in PUSH):
-            obj = p.objects.get(body[i - 2][2])
-            if obj and obj['type'] == 8 and obj['flags'] & 2:
-                state_objects.append(obj)
-    require(len(state_objects) == 1, 'unrecognized menu structure')
-    seq_resource = res[int(state_objects[0]['data'][-4:], 16) - 1]
+    require(all(titles), "菜单标题为空")
+    state_arrays = set()
+    for ident, body in p.functions.items():
+        for event in p.effects(body):
+            if (event[0] == "array" and event[3][0] == "array2"
+                    and event[3][2:] == (("global", episode_variable), flow.const(0))):
+                state_arrays.add(event[2])
+    require(len(state_arrays) == 1, "无法证明播放函数使用菜单传入的集号")
+    states_id = state_arrays.pop()
+    states = p.value(states_id)['values']
+    state_objects = {}
+    for ident, body in p.functions.items():
+        if p.references(body, "array2_get") != [states_id]:
+            continue
+        for event in p.effects(body):
+            if (event[0] == "call" and len(event[3]) == 4
+                    and any(n[1] == states_id for n in flow.nodes(event[3], "array2"))):
+                obj = p.objects.get(flow.number(event[3][-1]))
+                if obj and obj['type'] == 8 and obj['flags'] & 2:
+                    state_objects[obj["id"]] = obj
+    require(len(state_objects) == 1, "无法唯一证明播放状态表的来源")
+    seq_resource = res[int(next(iter(state_objects.values()))['data'][-4:], 16) - 1]
     seq_table = table(source.read_resource(seq_resource['uri']))
-    regions = {}
-    for region in ('A', 'B'):
-        marker = f'VideoSequencer.epRegionOffset = EpID.REG_{region}'
-        code = p.functions[p.find(marker)]
-        end = next((i for i, ins in enumerate(code) if ins[1:] == ['push_string', marker]))
-        before = code[:end]
-        assignment = max((i for i, ins in enumerate(before) if ins[1] == 'global_set'))
-        seq = before[assignment - 5:assignment + 1]
-        require([i[1] for i in seq] == ['push_u16', 'global_get', 'push_i32', 'check_scope', 'push_i16', 'global_set'], 'unrecognized menu structure')
-        require(seq[4][2] == region_variable, "区域分支没有写入实际使用的状态变量")
-        regions[region] = p.value(seq[0][2])
-    require(regions["A"] == 0 and regions["B"] > 0, "不支持的区域分支")
+    region_offsets = set()
+    for body in p.functions.values():
+        for event in p.effects(body):
+            if (event[0] == "write" and event[2] == region_variable
+                    and event[3][0] == "scope" and event[3][2][0] == "global"):
+                region_offsets.add(p.value(event[3][2][1]))
+    require(region_offsets and 0 in region_offsets
+            and all(isinstance(v, int) and 0 <= v < len(states) for v in region_offsets),
+            "无法确认播放状态分支")
+    regions = {f"offset_{v}": v for v in sorted(region_offsets)}
     rows = []
     for local in range(counts[disc_number - 1]):
         variants = {}
@@ -235,4 +284,4 @@ def analyze(source):
                 variants[region] = res[resource_id - 1]['uri']
         require(variants, 'unrecognized menu structure')
         rows.append(dict(episode=offset + local + 1, title=titles[offset + local], variants=variants))
-    return dict(disc=disc_number, counts=counts, titles=titles, episodes=rows, evidence=dict(title_table=title_resource['name'], title_handler=title_bindings[0][0], selected_row_variable=selected, playback_caller=caller, playback_function=play, local_index_function=translator, disc_offset_function=offset_func, state_table=seq_resource['name'], regions=regions))
+    return dict(disc=disc_number, counts=counts, titles=titles, episodes=rows, evidence=dict(title_table=title_resource['name'], title_handler=title_binding[0], selected_row_variable=selected, playback_caller=caller, playback_function=play, local_index_function=translator, disc_offset_function=offset_func, state_table=seq_resource['name'], regions=regions, analysis="bounded-data-flow"))

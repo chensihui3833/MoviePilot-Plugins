@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
-from . import onq
+from . import disc as disc_metadata, onq
 
 
 class NeedsReview(ValueError):
@@ -25,6 +25,28 @@ def read_navigation(jar):
     except (ValueError, KeyError, IndexError, TypeError, struct.error,
             UnicodeError, zipfile.BadZipFile, StopIteration) as exc:
         raise NeedsReview(f"无法从菜单脚本确认分集关系，停止整理：{exc}") from exc
+
+
+def read_disc_navigation(disc):
+    try:
+        entry = disc_metadata.discover(disc)
+        candidates = []
+        for item in entry["jars"]:
+            jar = Path(item["path"])
+            if jar.stat().st_size > 32 * 1024 * 1024:
+                raise NeedsReview("菜单 JAR 超过解析大小限制")
+            with zipfile.ZipFile(jar) as archive:
+                if "eng/RESDIR.QCD" in archive.namelist():
+                    candidates.append(item)
+        if len(candidates) != 1:
+            raise NeedsReview("索引登记的应用中没有唯一受支持的菜单，无法静态确认集号，停止整理")
+        candidate = candidates[0]
+        jar = Path(candidate["path"])
+        menu = read_navigation(jar)
+        menu["evidence"]["application_entries"] = candidate["applications"]
+        return menu, entry["files"] + [str(jar)]
+    except (OSError, ValueError, struct.error, zipfile.BadZipFile) as exc:
+        raise NeedsReview(f"导航入口待核对：{exc}") from exc
 
 
 def bounded_read(path, limit):
@@ -191,10 +213,7 @@ def scan_season(source_dir, series, season, output_root, tmdb_id="", ffprobe=Non
     evidence = []
     navigation = []
     for disc_number, disc in sorted(discs.items()):
-        jar = inside(disc / "BDMV/JAR/00002.jar", source)
-        if jar.stat().st_size > 32 * 1024 * 1024:
-            raise NeedsReview("菜单 JAR 超过首版解析大小限制")
-        menu = read_navigation(jar)
+        menu, navigation_files = read_disc_navigation(disc)
         titles = dict(enumerate(menu["titles"], 1))
         if menu["disc"] != disc_number or len(menu["counts"]) != len(discs):
             raise NeedsReview("目录盘号或盘数与菜单程序中的盘号、盘数不一致")
@@ -205,7 +224,8 @@ def scan_season(source_dir, series, season, output_root, tmdb_id="", ffprobe=Non
             raise NeedsReview("各盘没有一致的整季标题表，不能按整季顺序自动对应")
         if menu["counts"] != disc_counts or len(menu["episodes"]) != disc_counts[disc_number - 1]:
             raise NeedsReview("各盘菜单中的集数分配不一致")
-        evidence.append(hashlib.sha256(bounded_read(jar, 32 * 1024 * 1024)).hexdigest())
+        evidence.extend(hashlib.sha256(bounded_read(path, 32 * 1024 * 1024)).hexdigest()
+                        for path in navigation_files)
         navigation.append(menu["evidence"])
         for local_episode, episode in enumerate(menu["episodes"], 1):
             if episode["episode"] != len(rows) + 1 or episode["title"] != titles[len(rows) + 1]:
@@ -249,7 +269,7 @@ def scan_season(source_dir, series, season, output_root, tmdb_id="", ffprobe=Non
     for row in rows:
         row["title"] = all_titles[row["episode"]]
     plan = {
-        "format": "onq-static-navigation-hardlink-v2", "source": str(source),
+        "format": "onq-static-navigation-hardlink-v3", "source": str(source),
         "series": series.strip(), "season": season, "tmdb_id": str(tmdb_id),
         "output": str(output / series.strip()), "episodes": rows,
         "evidence": evidence,

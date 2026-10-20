@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
+from disc_fixtures import write_entries
 
 package = types.ModuleType("core_test_package")
 package.__path__ = [str(Path(__file__).parents[1] / "plugins/blurayepisodes")]
@@ -70,11 +71,13 @@ class CoreTest(unittest.TestCase):
         for folder in ("JAR/00002", "PLAYLIST", "STREAM"):
             (bdmv / folder).mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(bdmv / "JAR/00002.jar", "w") as archive:
+            archive.writestr("eng/RESDIR.QCD", b"fixture-manifest")
             for index, title in enumerate(titles or self.title_names, 1):
                 archive.writestr(
                     f"eng/tblEP_T3_{index:02}_res.qct",
                     b"QCTF\0TITLE\0" + title.encode() + b"\0Menu Title\0",
                 )
+        write_entries(bdmv)
         xml = ET.Element("playlist-metadata")
         for local, pid, clip in reversed(items):
             ET.SubElement(xml, "playlist", name=f"EP {local}", id=pid, duration_ms="60000")
@@ -100,6 +103,7 @@ class CoreTest(unittest.TestCase):
     def use_button_menu(self):
         for disc in sorted(self.source.glob("DISC*")):
             with zipfile.ZipFile(disc / "BDMV/JAR/00002.jar", "w") as archive:
+                archive.writestr("eng/RESDIR.QCD", b"fixture-manifest")
                 archive.writestr("eng/tblEP_res.qct", b"QCTF\0TITLE\0EPISODE SELECTIONS\0"
                                  + b"".join(f"BUTTON_{i:02}\0{title}\0".encode()
                                             for i, title in enumerate(self.title_names)))

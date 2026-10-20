@@ -81,11 +81,27 @@ def section(variables, functions, objects=(), screen=False):
 
 
 def fixture_jar(path, altered_title_binding=False, unknown_pure_opcode=False,
-                altered_playback_binding=False):
+                altered_playback_binding=False, repeated_state_users=False,
+                semantic_variant=False, counts_values=(4, 3, 3), disc_number=2,
+                playlist_numbers=None, contradictory_playback=False):
+    capacity = max(counts_values)
+    region_offset = capacity * 2
+    playlist_numbers = playlist_numbers or list(range(90000, 90000 + capacity))
+    def emit(items, locals_count=0):
+        if semantic_variant:
+            rewritten = []
+            for item in items:
+                if not isinstance(item, str):
+                    if item[0] in (1, 2, 3):
+                        item = (4, item[1])
+                    rewritten.append((0,))
+                rewritten.append(item)
+            items = rewritten
+        return assemble(items, locals_count)
     # IDs deliberately differ from the development discs.
     flag, disc, disc_count, counts, region_a, region_b = range(0xc001, 0xc007)
     selected, states, region_var, episode_var = 0x4001, 0x4002, 0x4003, 0x4004
-    store = assemble([(1, 0), (1, 0), (2, states), (40,),
+    store = emit([(1, 0), (1, 0), (2, states), (40,),
                       (5, "storeEpisodePlaylists()"),
                       (2, 11), (3, 0xc001), (22, 4), (63,)])
     region = []
@@ -114,29 +130,48 @@ def fixture_jar(path, altered_title_binding=False, unknown_pure_opcode=False,
         (32, 1), (32, 2), (3, counts), (36,), (6,), (34, 1),
         (65, 2, 1), (20, "loop"), "done", (32, 1), (54,), "end", (63,),
     ]
-    play = assemble([(32, 3), (2, 0x4002), (22, 1),
+    play = emit([(32, 3), (2, 0x4002), (22, 1),
                      (52,), (34, 1), (5, "playEpisode(epID = "),
                      (32, 1), (2, region_var), (44,), (6,), (32, 2), (6,),
-                     (2, episode_var), (46,), (63,)], 2)
-    caller = assemble([(1, 0), (1, 0), (2, selected), (44,), (2, 0x4001), (22, 3), (63,)])
-    enter = assemble([(2, selected if not altered_title_binding else 0x4003), (44,),
+                     (2, episode_var), (46,)] +
+                ([(1, 9), (2, episode_var), (46,)] if contradictory_playback else []) +
+                [(63,)], 2)
+    caller = emit([(1, 0), (1, 0), (2, selected), (44,), (2, 0x4001), (22, 3), (63,)])
+    enter = emit([(2, selected if not altered_title_binding else 0x4003), (44,),
                       (1, 1), (6,), (2, 10), (23, 1, 2), (63,)])
-    render = assemble([(5, "VideoSequencer.playEpisode()"),
+    render = emit([(5, "VideoSequencer.playEpisode()"),
                        (2, region_var if altered_playback_binding else episode_var),
                        (44,), (1, 0), (2, states), (40,), (63,)])
+    if semantic_variant:
+        # Same relationships with reordered addition, temporaries and different widths.
+        play = emit([(32, 3), (2, 0x4002), (22, 1), (52,), (34, 1),
+                     (32, 2), (2, region_var), (44,), (6,), (32, 1), (6,),
+                     (1, 0), (6,), (2, episode_var), (46,), (63,)], 2)
+        caller = emit([(2, selected), (44,), (34, 1),
+                       (1, 0), (1, 0), (32, 1), (2, 0x4001), (22, 3), (63,)], 1)
+        enter = emit([(1, 1), (2, selected), (44,), (6,), (34, 1),
+                      (1, 0), (32, 1), (2, 10), (23, 1, 2), (63,)], 1)
+        render = emit([(2, episode_var), (44,), (34, 1),
+                       (32, 1), (1, 0), (2, states), (40,), (63,)], 1)
     parent = bytes([3]) + struct.pack(">2H", 9, 1) + bytes(7) + b"\1" + struct.pack(">3H", 31, 0, 0x4005)
     title_obj = bytes([8]) + struct.pack(">2H", 10, 9) + b"\0\0\2\0"
     state_obj = bytes([8]) + struct.pack(">2H", 11, 1) + b"\2\xff\xff\0\3\0"
-    global_section = section([1, 2, 3, [4, 3, 3], 0, 8], [store, assemble(region)])
-    screen_section = section([0, list(range(16)), 0, 0],
-                             [play, assemble(translate, 5), caller, assemble(offset, 2), enter, render],
+    global_functions = [store, emit(region)]
+    screen_functions = [play, emit(translate, 5), caller, emit(offset, 2), enter, render]
+    if repeated_state_users:
+        global_functions.append(store)
+        screen_functions.append(render)
+    global_section = section([1, disc_number, len(counts_values), list(counts_values), 0, region_offset], global_functions)
+    screen_section = section([0, list(range(region_offset * 2)), 0, 0],
+                             screen_functions,
                              [parent, title_obj, state_obj], screen=True)
     qco = b"QCOF" + struct.pack(">2I", 5, 13 + len(global_section)) + b"\x0d" + global_section + screen_section
     entries = [
         (3, "screen", "file:///jar/program.QCO"),
         (5, "labels", "file:///jar/labels.qct"),
         (4, "sequence", "file:///jar/sequence.qcs"),
-    ] + [(64, f"opaque_{i}", f"bd://PLAYLIST:{90000+i:05}.ITEM:0.V1:1") for i in range(4)]
+    ] + [(64, f"opaque_{i}", f"bd://PLAYLIST:{pid:05}.ITEM:0.V1:1")
+         for i, pid in enumerate(playlist_numbers)]
     payload, index = bytearray(), bytearray()
     for kind, name, uri in entries:
         index.extend(struct.pack(">I", 32 + 4 * len(entries) + len(payload) - 8))
@@ -148,8 +183,8 @@ def fixture_jar(path, altered_title_binding=False, unknown_pure_opcode=False,
     struct.pack_into(">I", qcd, 16, 32)
     struct.pack_into(">H", qcd, 26, len(entries))
     qcd += index + payload
-    titles = [["TITLE", "EPISODES"]] + [[f"BUTTON_{i:02}", f"TITLE {i+1}"] for i in range(10)]
-    states_data = [[4 + i] for i in range(4)] + [[0]] * 4
+    titles = [["TITLE", "EPISODES"]] + [[f"BUTTON_{i:02}", f"TITLE {i+1}"] for i in range(sum(counts_values))]
+    states_data = [[4 + i] for i in range(capacity)] + [[0]] * capacity
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("eng/RESDIR.QCD", qcd)
         archive.writestr("common/program.QCO", qco)
@@ -158,6 +193,27 @@ def fixture_jar(path, altered_title_binding=False, unknown_pure_opcode=False,
 
 
 class NavigationTest(unittest.TestCase):
+    def test_order_comes_from_menu_for_different_counts_and_scrambled_playlist_ids(self):
+        for counts in ((2, 5, 1), (1, 2), (6, 1, 2, 3)):
+            with self.subTest(counts=counts), tempfile.TemporaryDirectory() as directory:
+                jar = Path(directory) / "menu.jar"
+                numbers = [80123, 7, 67234, 123, 90876, 900][:max(counts)]
+                fixture_jar(jar, counts_values=counts, disc_number=2,
+                            playlist_numbers=numbers, semantic_variant=True)
+                result = onq.read_navigation(jar)
+                self.assertEqual(result["counts"], list(counts))
+                self.assertEqual([e["episode"] for e in result["episodes"]],
+                                 list(range(counts[0] + 1, counts[0] + counts[1] + 1)))
+                self.assertEqual([e["variants"]["offset_0"] for e in result["episodes"]],
+                                 [f"bd://PLAYLIST:{n:05}.ITEM:0.V1:1" for n in numbers[:counts[1]]])
+
+    def test_multiple_functions_using_one_state_table_are_not_ambiguous(self):
+        with tempfile.TemporaryDirectory() as directory:
+            jar = Path(directory) / "menu.jar"
+            fixture_jar(jar, repeated_state_users=True)
+            result = onq.read_navigation(jar)
+            self.assertEqual([e["episode"] for e in result["episodes"]], [5, 6, 7])
+
     def test_synthetic_program_resolves_disc_two_without_episode_filenames(self):
         with tempfile.TemporaryDirectory() as directory:
             jar = Path(directory) / "menu.jar"
@@ -167,10 +223,32 @@ class NavigationTest(unittest.TestCase):
             self.assertEqual(result["disc"], 2)
             self.assertEqual([e["episode"] for e in result["episodes"]], [5, 6, 7])
             self.assertEqual(result["episodes"][0]["title"], "TITLE 5")
-            self.assertEqual(result["episodes"][0]["variants"]["A"], "bd://PLAYLIST:90000.ITEM:0.V1:1")
+            self.assertEqual(result["episodes"][0]["variants"]["offset_0"], "bd://PLAYLIST:90000.ITEM:0.V1:1")
+
+    def test_renamed_diagnostics_and_button_keys_do_not_determine_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            jar = Path(directory) / "menu.jar"
+            fixture_jar(jar)
+            with zipfile.ZipFile(jar) as archive:
+                contents = {name: archive.read(name) for name in archive.namelist()}
+            for name, data in contents.items():
+                # Same byte lengths so the fixture's offsets remain valid.
+                for marker in (b"playEpisode(epID = ", b"storeEpisodePlaylists()",
+                               b"VideoSequencer.playEpisode()",
+                               b"VideoSequencer.epRegionOffset = EpID.REG_A",
+                               b"VideoSequencer.epRegionOffset = EpID.REG_B"):
+                    data = data.replace(marker, b"X" * len(marker))
+                data = data.replace(b"BUTTON_", b"Opaque_")
+                contents[name] = data
+            with zipfile.ZipFile(jar, "w") as archive:
+                for name, data in contents.items():
+                    archive.writestr(name, data)
+            result = onq.read_navigation(jar)
+            self.assertEqual([e["episode"] for e in result["episodes"]], [5, 6, 7])
 
     def test_changed_title_binding_and_side_effecting_expression_fail_closed(self):
-        for change in ("altered_title_binding", "unknown_pure_opcode", "altered_playback_binding"):
+        for change in ("altered_title_binding", "unknown_pure_opcode", "altered_playback_binding",
+                       "contradictory_playback"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
                 jar = Path(directory) / "menu.jar"
                 fixture_jar(jar, **{change: True})
