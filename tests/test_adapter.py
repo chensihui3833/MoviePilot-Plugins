@@ -37,6 +37,9 @@ class AdapterTest(unittest.TestCase):
         patcher = patch.object(adapter, "install_path_adapter", return_value=lambda: None)
         patcher.start()
         self.addCleanup(patcher.stop)
+        preview_patcher = patch.object(adapter, "install_preview_adapter", return_value=lambda: None)
+        preview_patcher.start()
+        self.addCleanup(preview_patcher.stop)
 
     def test_toggle_does_not_start_work(self):
         plugin = adapter.BlurayEpisodes()

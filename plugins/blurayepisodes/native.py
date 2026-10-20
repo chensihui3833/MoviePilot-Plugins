@@ -131,6 +131,8 @@ def native_transfer(plugin, fileitem, meta, mediainfo, target_directory=None,
             if not show_root or not Path(show_root).resolve().is_relative_to(Path(plan["output"])):
                 raise NeedsReview("无法从 MoviePilot 命名规则确定剧集目录")
             result = export_plan(plan, plan["fingerprint"], preview=preview, should_stop=stopped)
+            if preview:
+                plugin._preview_plans[fileitem.path] = plan
             plugin.save_data("preview", plan)
             numbers = "、".join(str(row["episode"]) for row in plan["episodes"])
             message = f"{'预览通过' if preview else '分集完成'}：第 {numbers} 集；{result['episodes']} 个视频硬链接"

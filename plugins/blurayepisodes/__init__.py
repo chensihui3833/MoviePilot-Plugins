@@ -4,13 +4,14 @@ from app.sdk.plugin import _PluginBase
 
 from .native import native_transfer
 from .path_adapter import install as install_path_adapter
+from .preview_adapter import install as install_preview_adapter
 
 
 class BlurayEpisodes(_PluginBase):
     plugin_name = "蓝光电视剧分集"
     plugin_desc = "读取原盘菜单与播放列表，接入自动和手动整理，生成逐集硬链接与 NFO。"
     plugin_icon = ""
-    plugin_version = "0.2.1"
+    plugin_version = "0.2.2"
     plugin_author = "chensihui3833"
     author_url = "https://github.com/chensihui3833"
     plugin_config_prefix = "blurayepisodes_"
@@ -22,8 +23,10 @@ class BlurayEpisodes(_PluginBase):
         self.stop_service()
         self._config = dict(config or {})
         self._enabled = bool(self._config.get("enabled", False))
+        self._preview_plans = {}
         if self._enabled:
             self._restore_path_adapter = install_path_adapter(self)
+            self._restore_preview_adapter = install_preview_adapter(self)
 
     def get_module(self):
         return {"transfer": self.transfer}
@@ -90,3 +93,7 @@ class BlurayEpisodes(_PluginBase):
         if restore:
             restore()
             self._restore_path_adapter = None
+        restore = getattr(self, "_restore_preview_adapter", None)
+        if restore:
+            restore()
+            self._restore_preview_adapter = None

@@ -29,6 +29,7 @@ class NativeTest(unittest.TestCase):
         self.file = NS(path=str(self.source / "DISC1"), storage="local", type="dir")
         self.plugin = NS(
             get_state=lambda: True, _run_lock=Lock(), saved={},
+            _preview_plans={},
             chain=NS(run_module=lambda method, **kw: self.naming(**kw)),
         )
         self.plugin.save_data = lambda k, v: self.plugin.saved.update({k: v})
