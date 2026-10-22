@@ -32,6 +32,7 @@ class NativeTest(unittest.TestCase):
             _preview_plans={},
             chain=NS(run_module=lambda method, **kw: self.naming(**kw)),
         )
+        self.plugin.get_config = lambda: dict(self.plugin._config)
         self.plugin.save_data = lambda k, v: self.plugin.saved.update({k: v})
         self.stop = NS(is_system_stopped=False, consume_transfer_stop=lambda path: False)
         self.host = {
@@ -84,6 +85,29 @@ class NativeTest(unittest.TestCase):
             self.assertEqual(nfo.stem, nfo.with_suffix(".m2ts").stem)
         self.assertEqual(len(list(self.out.rglob("*.m2ts"))), 3)
         self.assertEqual(before, self.source_hashes())
+
+    def test_persisted_setting_controls_stale_provider_and_keeps_hardlinks(self):
+        self.plugin._config = {"preview_only": True}
+        self.plugin.get_config = lambda: {"preview_only": False}
+        result = self.transfer()
+        self.assertTrue(result.success, result.message)
+        for src, dst in zip(result.file_list, result.file_list_new):
+            self.assertTrue(Path(src).samefile(dst))
+
+    def test_persisted_preview_guard_and_config_read_error_block_before_analysis(self):
+        self.plugin._config = {"preview_only": False}
+        values = ({"preview_only": True}, {}, {"preview_only": "false"}, None)
+        with patch.object(native, "scan_with_agent") as analyze:
+            for value in values:
+                self.plugin.get_config = lambda: value
+                result = self.transfer()
+                self.assertFalse(result.success)
+            def broken():
+                raise RuntimeError("storage unavailable")
+            self.plugin.get_config = broken
+            self.assertFalse(self.transfer().success)
+            analyze.assert_not_called()
+        self.assertFalse(self.out.exists())
 
     def test_toggle_and_non_tv_passthrough(self):
         self.plugin.get_state = lambda: False

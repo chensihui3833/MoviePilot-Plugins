@@ -11,7 +11,7 @@ class BlurayEpisodes(_PluginBase):
     plugin_name = "蓝光电视剧分集"
     plugin_desc = "调用 MoviePilot 智能助手识别整季蓝光分集，沿用原生命名生成逐集硬链接与 NFO。"
     plugin_icon = ""
-    plugin_version = "0.5.2"
+    plugin_version = "0.5.3"
     plugin_author = "chensihui3833"
     author_url = "https://github.com/chensihui3833"
     plugin_config_prefix = "blurayepisodes_"

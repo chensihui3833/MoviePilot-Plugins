@@ -74,6 +74,19 @@ def prepare_native_plan(fileitem, meta, mediainfo, destination, recommend_name,
     return plan
 
 
+def require_execution_allowed(plugin):
+    # The host may retain an older bound provider after a config reload.
+    # Read the persisted value at the actual write boundary, never its stale snapshot.
+    try:
+        config = plugin.get_config()
+    except Exception as exc:
+        raise NeedsReview("无法读取插件最新执行配置，停止媒体写入") from exc
+    if not isinstance(config, dict):
+        raise NeedsReview("插件最新执行配置无效，停止媒体写入")
+    if config.get("preview_only", True) is not False:
+        raise NeedsReview("当前为仅预览模式；请先在文件管理中预览核对，再关闭插件的仅预览开关")
+
+
 def native_transfer(plugin, fileitem, meta, mediainfo, target_directory=None,
                     target_storage=None, target_path=None, transfer_type=None,
                     scrape=None, library_type_folder=None, library_category_folder=None,
@@ -90,8 +103,8 @@ def native_transfer(plugin, fileitem, meta, mediainfo, target_directory=None,
         return None
     # Once claimed, all errors become explicit failures. Never fall back to whole-disc transfer.
     try:
-        if not preview and getattr(plugin, "_config", {}).get("preview_only", True):
-            raise NeedsReview("当前为仅预览模式；请先在文件管理中预览核对，再关闭插件的仅预览开关")
+        if not preview:
+            require_execution_allowed(plugin)
         from app.modules.filemanager.transhandler import TransHandler
         from app.application.directory import DirectoryHelper
         from app.runtime.settings import get_runtime_setting
@@ -141,6 +154,8 @@ def native_transfer(plugin, fileitem, meta, mediainfo, target_directory=None,
             )
             if not show_root or not Path(show_root).resolve().is_relative_to(Path(plan["output"])):
                 raise NeedsReview("无法从 MoviePilot 命名规则确定剧集目录")
+            if not preview:
+                require_execution_allowed(plugin)
             result = export_plan(plan, plan["fingerprint"], preview=preview, should_stop=stopped)
             if preview:
                 plugin._preview_plans[fileitem.path] = plan
