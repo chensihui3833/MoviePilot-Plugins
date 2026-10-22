@@ -9,11 +9,15 @@ from pathlib import Path
 from .core import NeedsReview, export_plan, scan_season
 from .agent_mapping import scan_with_agent
 from .disc_layout import disc_number
+from .episode_source import source_location
 
 
 def prepare_native_plan(fileitem, meta, mediainfo, destination, recommend_name,
                         episodes_info=None, scanner=None):
-    disc = Path(fileitem.path).resolve(strict=True)
+    located = source_location(fileitem)
+    if located is None:
+        raise NeedsReview("源文件不是已支持的蓝光分集输入")
+    disc, selected_video = located
     number = disc_number(disc)
     if number is None:
         raise NeedsReview("无法确认原盘编号，请核对目录或盘内身份信息")
@@ -59,9 +63,14 @@ def prepare_native_plan(fileitem, meta, mediainfo, destination, recommend_name,
             raise NeedsReview("MoviePilot 命名规则把不同集映射到同一文件")
         seen.add(key)
         row["relative"] = relative.as_posix()
-    plan["episodes"] = [r for r in plan["episodes"] if r["disc"] == number]
+    plan["episodes"] = [r for r in plan["episodes"] if r["disc"] == number
+                        and (selected_video is None or Path(r["video"]) == selected_video)]
+    if selected_video is not None and plan["episodes"]:
+        number_expected = plan["episodes"][0]["episode"]
+        if getattr(meta, "begin_episode", None) != number_expected or getattr(meta, "end_episode", None):
+            raise NeedsReview("单集任务季集号与蓝光映射不一致，停止整理")
     if not plan["episodes"]:
-        raise NeedsReview("整季映射中没有当前盘")
+        raise NeedsReview("整季映射中没有当前源视频" if selected_video is not None else "整季映射中没有当前盘")
     plan["output"] = str(destination)
     # Existing show NFO belongs to the host; never replace it.
     plan["write_tvshow"] = False
@@ -96,13 +105,15 @@ def native_transfer(plugin, fileitem, meta, mediainfo, target_directory=None,
     from app.schemas.types import MediaType
 
     if (not plugin.get_state() or getattr(mediainfo, "type", None) != MediaType.TV
-            or fileitem.type != "dir" or fileitem.storage not in (None, "local")):
+            or fileitem.type not in ("dir", "file") or fileitem.storage not in (None, "local")):
         return None
-    disc = Path(fileitem.path)
-    if not (disc / "BDMV").is_dir():
-        return None
-    # Once claimed, all errors become explicit failures. Never fall back to whole-disc transfer.
+    # Once claimed, all errors become explicit failures. Never fall back to generic video transfer.
     try:
+        if source_location(fileitem) is None:
+            return None
+        if fileitem.type == "dir" and getattr(plugin, "_episode_tasks", False):
+            detail = getattr(plugin, "_episode_planning_errors", {}).get(str(Path(fileitem.path).resolve()))
+            raise NeedsReview(detail or "旧盘级输入尚未拆为逐集任务，请从文件管理重新预览完整季目录")
         if not preview:
             require_execution_allowed(plugin)
         from app.modules.filemanager.transhandler import TransHandler

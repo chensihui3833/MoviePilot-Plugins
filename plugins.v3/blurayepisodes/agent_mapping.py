@@ -68,18 +68,11 @@ def relative_file(value, source):
     return result
 
 
-def checked_plan(source_dir, series, season, output_root, mapping, tmdb_id="", ffprobe=None, expected_episodes=None):
+def validate_source_mapping(source_dir, season, mapping, ffprobe=None, expected_episodes=None):
+    """Validate source evidence without choosing or touching any output directory."""
     source = Path(source_dir).resolve(strict=True)
-    output = Path(output_root).resolve()
-    if output.is_relative_to(source) or source.is_relative_to(output):
-        raise NeedsReview("输出目录与原盘目录重叠")
-    if (not isinstance(series, str) or not series.strip() or series.strip() in {".", ".."}
-            or any(c in series for c in '/\\<>:"|?*') or any(ord(c) < 32 for c in series)):
-        raise NeedsReview("剧名含无效路径字符")
     if type(season) is not int or not 1 <= season <= 999:
         raise NeedsReview("需要明确的单一季号")
-    if tmdb_id and not str(tmdb_id).isdigit():
-        raise NeedsReview("TMDB 编号无效")
     if not isinstance(mapping, dict) or type(mapping.get("season")) is not int or mapping["season"] != season:
         raise NeedsReview("助手提交的季号与 MoviePilot 识别结果不一致")
     if mapping.get("unknown") != []:
@@ -162,15 +155,28 @@ def checked_plan(source_dir, series, season, output_root, mapping, tmdb_id="", f
                      "mtime_ns": stat.st_mtime_ns, "inode": stat.st_ino, "device": stat.st_dev})
     if set(counts) != set(discs):
         raise NeedsReview("助手未完成所有光盘的分集配对，停止整季整理")
-    plan = {"format": "assistant-mapping-hardlink-v1", "source": str(source),
-            "series": series.strip(), "season": season, "tmdb_id": str(tmdb_id),
-            "output": str(output / series.strip()), "episodes": rows,
+    return {"source": str(source), "season": season, "episodes": rows,
             "evidence": evidence_hashes, "navigation": [], "mapping_basis": basis.strip()}
+
+
+def checked_plan(source_dir, series, season, output_root, mapping, tmdb_id="", ffprobe=None, expected_episodes=None):
+    source = Path(source_dir).resolve(strict=True)
+    output = Path(output_root).resolve()
+    if output.is_relative_to(source) or source.is_relative_to(output):
+        raise NeedsReview("输出目录与原盘目录重叠")
+    if (not isinstance(series, str) or not series.strip() or series.strip() in {".", ".."}
+            or any(c in series for c in '/\\<>:"|?*') or any(ord(c) < 32 for c in series)):
+        raise NeedsReview("剧名含无效路径字符")
+    if tmdb_id and not str(tmdb_id).isdigit():
+        raise NeedsReview("TMDB 编号无效")
+    plan = validate_source_mapping(source, season, mapping, ffprobe, expected_episodes)
+    plan.update(format="assistant-mapping-hardlink-v1", series=series.strip(),
+                tmdb_id=str(tmdb_id), output=str(output / series.strip()))
     plan["fingerprint"] = hashlib.sha256(json.dumps(plan, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     return plan
 
 
-def scan_with_agent(plugin, source_dir, series, season, output_root, tmdb_id="", should_stop=None, expected_episodes=None):
+def _scan_agent(plugin, source_dir, season, validator, should_stop=None):
     from .agent_bridge import analyze
     source = Path(source_dir).resolve(strict=True)
     before = snapshot(source)
@@ -193,8 +199,7 @@ def scan_with_agent(plugin, source_dir, series, season, output_root, tmdb_id="",
         plugin.save_data("analysis_candidate", {"source": str(source), "season": season,
                          "snapshot": before, "mapping": mapping, "validated": False})
         plugin.save_data("status", "助手已提交配对，正在核对播放列表与完整视频范围")
-        plan = checked_plan(source, series, season, output_root, mapping, tmdb_id,
-                            expected_episodes=expected_episodes)
+        plan = validator(source, mapping)
         if snapshot(source) != before:
             raise NeedsReview("分析期间源目录发生变化，请重新预览")
         if should_stop and should_stop():
@@ -207,3 +212,14 @@ def scan_with_agent(plugin, source_dir, series, season, output_root, tmdb_id="",
     plugin.save_data("analysis_candidate", {"source": str(source), "season": season,
                      "snapshot": before, "mapping": mapping, "validated": True})
     return plan
+
+
+def scan_source_with_agent(plugin, source_dir, season, should_stop=None):
+    return _scan_agent(plugin, source_dir, season,
+                       lambda source, mapping: validate_source_mapping(source, season, mapping), should_stop)
+
+
+def scan_with_agent(plugin, source_dir, series, season, output_root, tmdb_id="", should_stop=None, expected_episodes=None):
+    return _scan_agent(plugin, source_dir, season,
+                       lambda source, mapping: checked_plan(source, series, season, output_root, mapping,
+                                                           tmdb_id, expected_episodes=expected_episodes), should_stop)

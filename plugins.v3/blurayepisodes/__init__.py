@@ -5,13 +5,14 @@ from app.sdk.plugin import _PluginBase
 from .native import native_transfer
 from .path_adapter import install as install_path_adapter
 from .preview_adapter import install as install_preview_adapter
+from .episode_adapter import install as install_episode_adapter
 
 
 class BlurayEpisodes(_PluginBase):
     plugin_name = "蓝光电视剧分集"
     plugin_desc = "调用 MoviePilot 智能助手识别整季蓝光分集，沿用原生命名生成逐集硬链接与 NFO。"
     plugin_icon = ""
-    plugin_version = "0.5.3"
+    plugin_version = "0.6.0"
     plugin_author = "chensihui3833"
     author_url = "https://github.com/chensihui3833"
     plugin_config_prefix = "blurayepisodes_"
@@ -24,9 +25,12 @@ class BlurayEpisodes(_PluginBase):
         self._config = dict(config or {})
         self._enabled = bool(self._config.get("enabled", False))
         self._preview_plans = {}
+        self._episode_tasks = True
+        self._episode_planning_errors = {}
         self._analysis_failures = {}
         if self._enabled:
             self._restore_path_adapter = install_path_adapter(self)
+            self._restore_episode_adapter = install_episode_adapter(self)
             self._restore_preview_adapter = install_preview_adapter(self)
 
     def get_agent_tools(self):
@@ -98,6 +102,10 @@ class BlurayEpisodes(_PluginBase):
 
     def stop_service(self):
         self._enabled = False
+        restore = getattr(self, "_restore_episode_adapter", None)
+        if restore:
+            restore()
+            self._restore_episode_adapter = None
         restore = getattr(self, "_restore_path_adapter", None)
         if restore:
             restore()
