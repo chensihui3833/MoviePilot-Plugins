@@ -4,7 +4,7 @@
 
 ## 安装与预览
 
-插件源仍为本仓库。在 MoviePilot 插件市场安装或更新 **蓝光电视剧分集（BlurayEpisodes）0.5.0**。请区分另一款 **蓝光原盘分集（BlurayEpisodeSplit）**，不要同时启用两个整理接管插件。
+插件源仍为本仓库，原生 V3 索引为 `package.v3.json`（源码在 `plugins.v3/blurayepisodes`），同时保留旧布局以兼容来源记录。在 MoviePilot 插件市场安装或更新 **蓝光电视剧分集（BlurayEpisodes）0.5.0**。请区分另一款 **蓝光原盘分集（BlurayEpisodeSplit）**，不要同时启用两个整理接管插件。
 
 1. 在系统设置启用并配置智能助手，确认模型调用测试成功。
 2. 启用本插件，保持默认的 **仅预览** 开关开启。

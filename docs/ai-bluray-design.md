@@ -24,7 +24,7 @@
 
 首版面向原 0.4.0 已明确支持的本地目录型 BDMV、DISC1…完整单季和完整单视频单集。多个 PlayItem、部分视频区间、多角度不能通过整文件硬链接等价导出，明确失败。ISO 不宣称支持。助手可自主理解不同菜单；插件不内置按片名或菜单引擎匹配集序的分支，也不把现有样本叫未知盘盲测。
 
-接口暂限定已核对的 MoviePilot >=3.1.5,<3.1.7。后台 Agent 接口为内部接口，能力不足时给出明确失败。0.5.0 恢复原 BlurayEpisodes ID 到 package.json；保留另一插件但提示不要同时启用，以免 transfer provider 冲突。不会修改 package.v2.json 冒称支持 V2。只向 GitHub 发布代码及合成测试，不上传用户原盘或配置。
+接口暂限定已核对的 MoviePilot >=3.1.5,<3.1.7。后台 Agent 接口为内部接口，能力不足时给出明确失败。0.5.0 恢复原 BlurayEpisodes ID 到 package.json，并提供 package.v3.json / plugins.v3 原生 V3 布局；保留另一插件但提示不要同时启用，以免 transfer provider 冲突。不会修改 package.v2.json 冒称支持 V2。只向 GitHub 发布代码及合成测试，不上传用户原盘或配置。
 
 ## 验收
 
