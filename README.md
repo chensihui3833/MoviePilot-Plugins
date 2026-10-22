@@ -1,10 +1,10 @@
-# 蓝光电视剧分集（BlurayEpisodes）0.6.0
+# 蓝光电视剧分集（BlurayEpisodes）0.6.1
 
 基于原 **Codex 版 0.4.0**，保留媒体匹配、MoviePilot 命名、原生整理预览、硬链接及 NFO 输出，将分集识别改为调用 MoviePilot 已配置的智能助手。
 
 ## 安装与预览
 
-插件源仍为本仓库，原生 V3 索引为 `package.v3.json`（源码在 `plugins.v3/blurayepisodes`），同时保留旧布局以兼容来源记录。在 MoviePilot 插件市场安装或更新 **蓝光电视剧分集（BlurayEpisodes）0.6.0**。请区分另一款 **蓝光原盘分集（BlurayEpisodeSplit）**，不要同时启用两个整理接管插件。
+插件源仍为本仓库，原生 V3 索引为 `package.v3.json`（源码在 `plugins.v3/blurayepisodes`），同时保留旧布局以兼容来源记录。在 MoviePilot 插件市场安装或更新 **蓝光电视剧分集（BlurayEpisodes）0.6.1**。请区分另一款 **蓝光原盘分集（BlurayEpisodeSplit）**，不要同时启用两个整理接管插件。
 
 1. 在系统设置启用并配置智能助手，确认模型调用测试成功。
 2. 启用本插件，保持默认的 **仅预览** 开关开启。
@@ -12,7 +12,7 @@
 4. 核对逐集源视频、季集号、目标文件名和匹配结果。首次需等待助手分析整季；同一源内容的后续各盘复用结果。
 5. 只有核对并决定正式整理后，再关闭“仅预览”。该开关开启时，正式整理会明确拒绝，不会创建媒体硬链接。
 
-升级不会主动扫描或整理原盘；不用另填模型密钥、下载目录或媒体库目录。0.6.0 是需要先预览验收的版本，不代表任意蓝光菜单均已验证。
+升级不会主动扫描或整理原盘；不用另填模型密钥、下载目录或媒体库目录。0.6.1 是需要先预览验收的版本，不代表任意蓝光菜单均已验证。
 
 ## 输出
 
@@ -59,7 +59,7 @@ python -m unittest discover -s tests -v
 
 历史基线：[0.4.0 / 5991efe446a9](https://github.com/chensihui3833/MoviePilot-Plugins/tree/5991efe446a9/plugins/blurayepisodes)。设计见 [接入设计](docs/ai-bluray-design.md)。另一款插件保留在仓库，其原说明见 [BlurayEpisodeSplit 旧说明](docs/BlurayEpisodeSplit-legacy.md)。
 
-## 逐集整理记录（0.6.0）
+## 逐集整理记录（0.6.1）
 
 已验证的蓝光配对在提交前拆为逐集原生任务，媒体整理历史以真实 M2TS 为源路径，每集各一条成功/失败记录，可按集重试。视频仍按 MoviePilot 模板生成硬链接和 NFO；不改变原盘，不靠复制整盘成功状态生成记录。单集输出冲突不会导致其他集的成功被合并成整盘失败。
 

@@ -104,6 +104,16 @@ class EpisodeTaskTest(unittest.TestCase):
         self.assertEqual(before,self.f.source_hashes())
         self.assertEqual(self.ai.call_count,1)
 
+    def test_host_disc_promotion_restores_only_explicit_stream(self):
+        planner, items, _ = self.planned()
+        retry = self.Planner(); retry._fileitem = items[1][0]
+        planned, inherited = retry._plan_file_items([self.disc_items()[0]])
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0][0].path, items[1][0].path)
+        self.assertFalse(planned[0][1])
+        meta, _ = retry._build_file_context(planned[0][0], None, None, False)
+        self.assertEqual(meta.begin_episode, 2)
+
     def test_unmapped_video_and_wrong_episode_retry_rejected(self):
         planner,items,_ = self.planned()
         planner = self.Planner(); planner._meta=copy.deepcopy(self.parent); planner._meta.begin_episode=3

@@ -59,6 +59,12 @@ def install(plugin, planner_class=None):
         planned, inherited = original_plan(planner, items)
         if not plugin.get_state():
             return planned, inherited
+        # Host collection promotes any BDMV child back to its disc root.
+        # Restore an explicitly selected real stream before task admission.
+        requested = getattr(planner, "_fileitem", None)
+        requested_location = source_location(requested) if requested is not None else None
+        if requested_location is not None and requested_location[1] is not None:
+            return [(requested, False)], {}
         result, seen = [], set()
         known = getattr(planner, "_bluray_episode_meta", None)
         if known is None:
