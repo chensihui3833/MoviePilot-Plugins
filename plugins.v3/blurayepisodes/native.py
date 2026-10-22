@@ -8,14 +8,15 @@ from pathlib import Path
 
 from .core import NeedsReview, export_plan, scan_season
 from .agent_mapping import scan_with_agent
+from .disc_layout import disc_number
 
 
 def prepare_native_plan(fileitem, meta, mediainfo, destination, recommend_name,
                         episodes_info=None, scanner=None):
     disc = Path(fileitem.path).resolve(strict=True)
-    match = re.fullmatch(r"(?:disc|disk)[ ._-]*0*(\d+)", disc.name, re.IGNORECASE)
-    if not match:
-        raise NeedsReview("需以 DISC1、DISC2… 命名并放在同一完整季目录下")
+    number = disc_number(disc)
+    if number is None:
+        raise NeedsReview("无法确认原盘编号，请核对目录或盘内身份信息")
     if not getattr(meta, "begin_season", None) or getattr(meta, "end_season", None):
         raise NeedsReview("未明确识别单一季号，请在 MoviePilot 手动整理中指定季号")
     destination = Path(destination).resolve()
@@ -58,7 +59,7 @@ def prepare_native_plan(fileitem, meta, mediainfo, destination, recommend_name,
             raise NeedsReview("MoviePilot 命名规则把不同集映射到同一文件")
         seen.add(key)
         row["relative"] = relative.as_posix()
-    plan["episodes"] = [r for r in plan["episodes"] if r["disc"] == int(match[1])]
+    plan["episodes"] = [r for r in plan["episodes"] if r["disc"] == number]
     if not plan["episodes"]:
         raise NeedsReview("整季映射中没有当前盘")
     plan["output"] = str(destination)

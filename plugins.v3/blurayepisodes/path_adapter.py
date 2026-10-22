@@ -4,6 +4,8 @@ import re
 from functools import wraps
 from pathlib import Path
 
+from .disc_layout import disc_number
+
 
 def install(plugin, planner_class=None):
     if planner_class is None:
@@ -17,7 +19,7 @@ def install(plugin, planner_class=None):
     def build(planner, source_path, custom_word_list=None, force_video=False, *, storage="local"):
         path = Path(source_path)
         if (plugin.get_state() and storage in (None, "local")
-                and re.fullmatch(r"(?:disc|disk)[ ._-]*0*\d+", path.name, re.I)
+                and disc_number(path) is not None
                 and (path / "BDMV").is_dir()):
             from app.schemas.types import MediaType
             parent_meta = original(

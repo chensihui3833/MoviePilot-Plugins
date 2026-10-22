@@ -7,20 +7,23 @@ import shutil
 import struct
 from pathlib import Path
 
+from .disc_layout import disc_number
 from .core import NeedsReview, bounded_read, inside, playlist_items, probe_video
 
 
 def discs_in(source):
+    source = Path(source).resolve(strict=True)
     discs = {}
     for path in source.iterdir():
-        match = re.fullmatch(r"(?:disc|disk)[ ._-]*0*(\d+)", path.name, re.I)
-        if match and path.is_dir() and (path / "BDMV").is_dir():
-            number = int(match[1])
+        if path.is_dir() and (path / "BDMV").is_dir():
+            number = disc_number(path)
+            if number is None:
+                raise NeedsReview("无法确定某个原盘的盘号，请核对目录或盘内身份信息")
             if path.is_symlink() or number in discs:
                 raise NeedsReview("盘目录存在跳转或重复盘号")
             discs[number] = inside(path, source)
     if not discs or sorted(discs) != list(range(1, len(discs) + 1)):
-        raise NeedsReview("请选择 DISC1 开始连续的完整单季 BDMV 目录")
+        raise NeedsReview("请选择盘号从1开始连续的完整单季 BDMV 目录")
     return discs
 
 

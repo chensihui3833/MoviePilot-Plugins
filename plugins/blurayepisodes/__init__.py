@@ -11,7 +11,7 @@ class BlurayEpisodes(_PluginBase):
     plugin_name = "蓝光电视剧分集"
     plugin_desc = "调用 MoviePilot 智能助手识别整季蓝光分集，沿用原生命名生成逐集硬链接与 NFO。"
     plugin_icon = ""
-    plugin_version = "0.5.0"
+    plugin_version = "0.5.1"
     plugin_author = "chensihui3833"
     author_url = "https://github.com/chensihui3833"
     plugin_config_prefix = "blurayepisodes_"
@@ -67,7 +67,7 @@ class BlurayEpisodes(_PluginBase):
             {"component": "VSwitch", "props": {"model": "preview_only", "label": "仅预览（核对后再关闭以允许硬链接整理）"}},
             {"component": "VTextField", "props": {"model": "analysis_timeout", "type": "number", "label": "助手单次分析超时（秒，30–3600）"}},
             {"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
-             "text": "请先启用并配置 MoviePilot 智能助手，停用另一款 BlurayEpisodeSplit 避免整理入口冲突。完整一季的 DISC1、DISC2… 必须在同一目录，源与目标须在同一文件系统。信息不足或文件冲突会失败并提示，不回退整盘整理。原生重新整理可能在插件执行前清理旧目标；部署前须核对联动删除插件。"},
+             "text": "请先启用并配置 MoviePilot 智能助手，停用另一款 BlurayEpisodeSplit 避免整理入口冲突。完整一季的各盘必须在同一目录（支持完整片名含 Disc1 等真实下载目录），源与目标须在同一文件系统。信息不足或文件冲突会失败并提示，不回退整盘整理。原生重新整理可能在插件执行前清理旧目标；部署前须核对联动删除插件。"},
         ]}], {"enabled": False, "analysis_timeout": 1200, "preview_only": True}
 
     def get_page(self):
