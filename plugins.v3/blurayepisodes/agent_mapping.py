@@ -4,11 +4,12 @@ import json
 import math
 import re
 import shutil
-import struct
+import time
 from pathlib import Path
 
+from .playlist_guard import validate_subpaths
 from .disc_layout import disc_number
-from .core import NeedsReview, bounded_read, inside, playlist_items, probe_video
+from .core import NeedsReview, bounded_read, inside, probe_video
 
 
 def discs_in(source):
@@ -131,10 +132,7 @@ def checked_plan(source_dir, series, season, output_root, mapping, tmdb_id="", f
             if path.parent != disc / "BDMV/PLAYLIST" or not re.fullmatch(r"\d{5}\.mpls", path.name, re.I):
                 raise NeedsReview("播放列表不属于提交的实际光盘")
             data = bounded_read(path, 8 * 1024 * 1024)
-            items = playlist_items(data)
-            start = struct.unpack_from(">I", data, 8)[0]
-            if struct.unpack_from(">H", data, start + 8)[0]:
-                raise NeedsReview("播放列表含独立子路径，不能确认完整文件硬链接等价")
+            items = validate_subpaths(data)
             variants.append((path, items))
             evidence_hashes[str(path.relative_to(source))] = hashlib.sha256(data).hexdigest()
         playlist, clips = variants[0]
@@ -177,15 +175,35 @@ def scan_with_agent(plugin, source_dir, series, season, output_root, tmdb_id="",
     source = Path(source_dir).resolve(strict=True)
     before = snapshot(source)
     key = "agent_mapping_" + hashlib.sha256(f"{source}\0{season}".encode()).hexdigest()
+    failures = getattr(plugin, "_analysis_failures", None)
+    if failures is None:
+        failures = plugin._analysis_failures = {}
+    previous = failures.get(key)
+    if previous and previous[0] == before and time.monotonic() - previous[1] < 60:
+        raise NeedsReview("同季预览刚刚未通过，暂不重复调用助手：" + previous[2])
     cached = plugin.get_data(key)
     mapping = cached.get("mapping") if isinstance(cached, dict) and cached.get("snapshot") == before else None
-    if mapping is None:
-        mapping = analyze(source, season, plugin._config.get("analysis_timeout", 1200), should_stop)
-    plan = checked_plan(source, series, season, output_root, mapping, tmdb_id,
-                        expected_episodes=expected_episodes)
-    if snapshot(source) != before:
-        raise NeedsReview("分析期间源目录发生变化，请重新预览")
-    if should_stop and should_stop():
-        raise NeedsReview("整理已停止")
+    try:
+        if mapping is None:
+            plugin.save_data("status", "正在调用智能助手分析整季蓝光；仅分析，不修改媒体")
+            mapping = analyze(source, season, plugin._config.get("analysis_timeout", 1200), should_stop)
+        if snapshot(source) != before:
+            raise NeedsReview("分析期间源目录发生变化，请重新预览")
+        # Preserve a failed candidate for diagnosis, never treat it as an accepted plan/cache.
+        plugin.save_data("analysis_candidate", {"source": str(source), "season": season,
+                         "snapshot": before, "mapping": mapping, "validated": False})
+        plugin.save_data("status", "助手已提交配对，正在核对播放列表与完整视频范围")
+        plan = checked_plan(source, series, season, output_root, mapping, tmdb_id,
+                            expected_episodes=expected_episodes)
+        if snapshot(source) != before:
+            raise NeedsReview("分析期间源目录发生变化，请重新预览")
+        if should_stop and should_stop():
+            raise NeedsReview("整理已停止")
+    except Exception as exc:
+        failures[key] = (before, time.monotonic(), str(exc))
+        raise
+    failures.pop(key, None)
     plugin.save_data(key, {"snapshot": before, "mapping": mapping})
+    plugin.save_data("analysis_candidate", {"source": str(source), "season": season,
+                     "snapshot": before, "mapping": mapping, "validated": True})
     return plan

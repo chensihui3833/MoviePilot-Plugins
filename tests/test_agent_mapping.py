@@ -125,7 +125,26 @@ class AgentMappingTest(unittest.TestCase):
              patch.object(mapping.shutil, "which", return_value="stub"):
             with self.assertRaises(mapping.NeedsReview):
                 mapping.scan_with_agent(plugin, self.source, "Test Show", 1, self.out)
-        self.assertEqual(store, {})
+        self.assertEqual(set(store), {"status"})
+        self.assertNotIn("analysis_candidate", store)
+
+    def test_rejected_analysis_not_repeated_for_next_disc_and_candidate_not_accepted(self):
+        store = {}
+        plugin = types.SimpleNamespace(_config={}, get_data=store.get,
+                                       save_data=lambda k, v: store.update({k: v}))
+        bad = copy.deepcopy(self.result); bad["unknown"] = ["uncertain"]
+        with patch.object(bridge, "analyze", return_value=bad) as analyze:
+            for _ in range(3):
+                with self.assertRaises(mapping.NeedsReview):
+                    mapping.scan_with_agent(plugin, self.source, "Test Show", 1, self.out)
+            self.assertEqual(analyze.call_count, 1)
+            self.assertFalse(store["analysis_candidate"]["validated"])
+            self.assertFalse(any(k.startswith("agent_mapping_") for k in store))
+            with patch.object(mapping.time, "monotonic", return_value=10**12):
+                with self.assertRaises(mapping.NeedsReview):
+                    mapping.scan_with_agent(plugin, self.source, "Test Show", 1, self.out)
+            self.assertEqual(analyze.call_count, 2)
+        self.assertFalse(self.out.exists())
 
     def test_preview_only_blocks_real_transfer_before_analysis(self):
         from test_native import NativeTest, native
