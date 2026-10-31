@@ -23,3 +23,4 @@ class PackageLayoutTest(unittest.TestCase):
         self.assertEqual(versions, [three["version"]])
         self.assertFalse(three["v2"])
         self.assertTrue(three["v3"])
+        self.assertNotIn("system_version", three)
