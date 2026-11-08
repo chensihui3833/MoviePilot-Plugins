@@ -1,4 +1,5 @@
 import importlib.util
+import importlib
 import sys
 import unittest
 from pathlib import Path
@@ -109,6 +110,59 @@ class QBBridgeTests(unittest.TestCase):
         self.assertIsNone(self.qb.get_task(H1))
         self.client.error = True
         with self.assertRaises(bridge.QBUnavailable): self.qb.get_task(H1)
+
+
+class QBFleetTests(unittest.TestCase):
+    def setUp(self):
+        self.first, self.second = Client(), Client()
+        self.fleet = bridge.QBFleet({"本地 QB": bridge.QBBridge(Module(self.first), "群晖 QB"),
+                                    "群晖 QB": bridge.QBBridge(Module(self.second), "群晖 QB")})
+        self.path = "/源/pack/33.mkv"
+
+    def test_same_hash_in_both_downloaders_is_two_distinct_tasks(self):
+        tasks = self.fleet.tasks_for([self.path])
+        self.assertEqual(len(tasks), 2)
+        self.assertNotEqual(tasks[0]["hash"], tasks[1]["hash"])
+        for task in tasks:
+            self.assertTrue(self.fleet.pause(task))
+            self.assertTrue(self.fleet.verify_task(task))
+            self.assertTrue(self.fleet.remove(task))
+        self.assertEqual(self.first.deletes, [(H1, False)])
+        self.assertEqual(self.second.deletes, [(H1, False)])
+
+    def test_one_unavailable_downloader_blocks_before_any_pause(self):
+        self.second.error = True
+        with self.assertRaises(bridge.QBUnavailable): self.fleet.tasks_for([self.path])
+        self.assertEqual(self.first.rows[H1]["state"], "uploading")
+        self.assertEqual(self.first.deletes, [])
+
+    def test_unknown_or_malformed_namespaced_task_is_rejected(self):
+        for key in ('bad', '["不存在","' + H1 + '"]', '["本地 QB",null]'):
+            with self.subTest(key=key), self.assertRaises(bridge.QBUnavailable):
+                self.fleet.get_task(key)
+
+    def test_known_partial_state_is_kept_separate_for_each_downloader(self):
+        tasks = self.fleet.tasks_for([self.path])
+        self.first.rows[H1].update(state="stoppedDL", progress=0.5)
+        with self.assertRaises(bridge.QBUnavailable): self.fleet.tasks_for([self.path])
+        history = {tasks[0]["hash"]: {"files": tasks[0]["files"], "retired": [tasks[0]["files"][1]]}}
+        self.assertEqual(len(self.fleet.tasks_for([self.path], history)), 2)
+
+    def test_cross_downloader_seeders_both_pause_before_source_cleanup(self):
+        coordinator = importlib.import_module(package.__name__ + ".torrent_coordinator")
+        journal, deleted = {}, []
+        def delete(check):
+            self.assertEqual(self.first.rows[H1]["state"], "stoppedUP")
+            self.assertEqual(self.second.rows[H1]["state"], "stoppedUP")
+            if not check(): return False
+            deleted.append(self.path)
+            return True
+        candidate = {"source": self.path, "identity": {"ino": 7}}
+        outcome = coordinator.run_candidate(self.fleet, candidate, journal, lambda _: None, delete, lambda _: True)
+        self.assertTrue(outcome["cleaned"])
+        self.assertEqual(deleted, [self.path])
+        self.assertEqual(outcome["removed_tasks"], 0)
+        self.assertEqual(len(journal["tasks"]), 2)
 
 
 if __name__ == "__main__": unittest.main()

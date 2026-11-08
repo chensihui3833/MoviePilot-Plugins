@@ -1,6 +1,7 @@
 """使用宿主已连接的指定 QB 实例；不读取或保存认证配置。"""
 
 from collections.abc import Sequence
+import json
 import math
 from pathlib import Path
 import time
@@ -128,6 +129,63 @@ class QBBridge:
                 return True
             time.sleep(0.25)
         return False
+
+
+class QBFleet:
+    """将多个下载器的同哈希任务视为不同任务；任一查询失败均中止。"""
+
+    def __init__(self, bridges):
+        if len(bridges) < 2 or any(not isinstance(name, str) or not name for name in bridges):
+            raise QBUnavailable("多个下载器的配置无效")
+        self.bridges = dict(bridges)
+
+    @staticmethod
+    def _key(name, tid):
+        return json.dumps([name, tid], ensure_ascii=False, separators=(",", ":"))
+
+    def _decode(self, key):
+        try:
+            pair = json.loads(key)
+        except (TypeError, ValueError):
+            raise QBUnavailable("下载器任务标识无效") from None
+        if (not isinstance(pair, list) or len(pair) != 2
+                or not all(isinstance(part, str) and part for part in pair)
+                or pair[0] not in self.bridges or self._key(*pair) != key):
+            raise QBUnavailable("下载器任务标识无效")
+        return pair
+
+    def _unwrap(self, task):
+        name, tid = self._decode(task.get("hash"))
+        return self.bridges[name], {**task, "hash": tid}
+
+    def tasks_for(self, candidates, known_retired=None):
+        history = known_retired or {}
+        groups = {name: {} for name in self.bridges}
+        for key, record in history.items():
+            name, tid = self._decode(key)
+            groups[name][tid] = record
+        result = []
+        for name, bridge in self.bridges.items():
+            for task in bridge.tasks_for(candidates, groups[name]):
+                result.append({**task, "hash": self._key(name, task["hash"])})
+        return result
+
+    def pause(self, task):
+        bridge, inner = self._unwrap(task)
+        return bridge.pause(inner)
+
+    def verify_task(self, task):
+        bridge, inner = self._unwrap(task)
+        return bridge.verify_task(inner)
+
+    def remove(self, task):
+        bridge, inner = self._unwrap(task)
+        return bridge.remove(inner)
+
+    def get_task(self, key):
+        name, tid = self._decode(key)
+        task = self.bridges[name].get_task(tid)
+        return {**task, "hash": key} if task is not None else None
 
 
 def existing_qb(name):

@@ -147,5 +147,54 @@ class IntegrationTests(unittest.TestCase):
             self.assertFalse(self.qb.paused)
             self.assertFalse(self.qb.removed)
 
+    def test_two_downloaders_same_torrent_both_pause_and_finish(self):
+        other = FakeQB(self.qb.files)
+        self.instance._config["qb_names"] = ["群晖 QB", "本地 QB"]
+        clients = {"群晖 QB": self.qb, "本地 QB": other}
+        with patch.dict(sys.modules, self.modules), patch.object(self.plugin, "scan_tree", self.scan_tree), \
+                patch.object(self.plugin, "delete_verified", self.delete_verified), \
+                patch.object(self.plugin, "existing_qb", lambda name: clients[name]):
+            with patch.object(self.plugin.time, "monotonic", return_value=1000): self.instance.scan()
+            self.library["/库/33.mkv"] = item(133, "/库/33.mkv")
+            with patch.object(self.plugin.time, "monotonic", return_value=1001): self.instance.scan()
+            with patch.object(self.plugin.time, "monotonic", return_value=1601): self.instance.scan()
+            self.assertNotIn("/源/33.mkv", self.sources)
+            self.assertIn("/源/34.mkv", self.sources)
+            self.assertTrue(self.qb.paused and other.paused)
+            self.assertFalse(self.qb.removed or other.removed)
+            self.library["/库/34.mkv"] = item(134, "/库/34.mkv")
+            with patch.object(self.plugin.time, "monotonic", return_value=1602): self.instance.scan()
+            with patch.object(self.plugin.time, "monotonic", return_value=2202): self.instance.scan()
+            self.assertTrue(self.qb.removed and other.removed)
+            self.assertEqual(self.saved["status"]["removed_tasks"], 2)
+
+    def test_changing_downloaders_with_unfinished_journal_does_not_clear_it(self):
+        other = FakeQB(self.qb.files)
+        with patch.dict(sys.modules, self.modules), patch.object(self.plugin, "scan_tree", self.scan_tree), \
+                patch.object(self.plugin, "delete_verified", self.delete_verified), \
+                patch.object(self.plugin, "existing_qb", lambda name: {"群晖 QB": self.qb, "本地 QB": other}[name]):
+            with patch.object(self.plugin.time, "monotonic", return_value=1000): self.instance.scan()
+            self.library["/库/33.mkv"] = item(133, "/库/33.mkv")
+            with patch.object(self.plugin.time, "monotonic", return_value=1001): self.instance.scan()
+            with patch.object(self.plugin.time, "monotonic", return_value=1601): self.instance.scan()
+            before = deepcopy(self.saved["qb_journal"])
+            self.instance._config["qb_names"] = ["本地 QB", "群晖 QB"]
+            with patch.object(self.plugin.time, "monotonic", return_value=1602): self.instance.scan()
+            self.assertFalse(self.saved["status"]["ok"])
+            self.assertEqual(self.saved["status"]["error"], "CoordinationError")
+            self.assertEqual(self.saved["qb_journal"], before)
+            self.assertIn("/源/34.mkv", self.sources)
+
+    def test_explicitly_empty_selection_blocks_cleanup_even_with_legacy_name(self):
+        self.instance._config["qb_names"] = []
+        with patch.dict(sys.modules, self.modules), patch.object(self.plugin, "scan_tree", self.scan_tree), \
+                patch.object(self.plugin, "delete_verified", self.delete_verified), \
+                patch.object(self.plugin, "existing_qb", lambda name: self.qb):
+            with patch.object(self.plugin.time, "monotonic", return_value=1000): self.instance.scan()
+            self.assertFalse(self.saved["status"]["ok"])
+            self.assertEqual(self.saved["status"]["detail"], "请选择至少一个 QB 下载器")
+            self.assertFalse(self.qb.paused)
+            self.assertEqual(len(self.sources), 2)
+
 
 if __name__ == "__main__": unittest.main()

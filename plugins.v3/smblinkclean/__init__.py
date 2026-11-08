@@ -13,7 +13,7 @@ from app.runtime.log import logger
 from app.sdk.plugin.base import _PluginBase
 
 from .core import VIDEO_EXTENSIONS, calculate, file_key, identity, parse_pairs
-from .qb_bridge import existing_qb
+from .qb_bridge import QBFleet, QBUnavailable, existing_qb
 from .torrent_coordinator import CoordinationError, finalize_ready, run_candidate
 from .verified_delete import delete_verified
 
@@ -22,6 +22,23 @@ CONFIRM_SECONDS = 600
 SESSION_ID = uuid.uuid4().hex
 # Linux CIFS Minshall+French links can appear over SMB as regular files of this size.
 POSSIBLE_MF_SYMLINK_SIZE = 1067
+
+
+def selected_downloaders(config):
+    """未迁移时保留旧单选值；明确清空多选不会回退到旧值。"""
+    if "qb_names" in config:
+        names = config["qb_names"]
+        if not isinstance(names, list) or any(not isinstance(name, str) or not name.strip() or "\0" in name for name in names):
+            raise CoordinationError("QB 下载器选择无效")
+        names = [name.strip() for name in names]
+    else:
+        legacy = config.get("qb_name") or ""
+        if not isinstance(legacy, str) or "\0" in legacy:
+            raise CoordinationError("QB 下载器选择无效")
+        names = [legacy.strip()] if legacy.strip() else []
+    if len(set(names)) != len(names):
+        raise CoordinationError("QB 下载器重复")
+    return sorted(names)
 
 
 class PossibleEncodedLinkError(ValueError):
@@ -103,7 +120,7 @@ def scan_tree(client, unc_root, logical_root, max_files=MAX_FILES):
 class SmbLinkClean(_PluginBase):
     plugin_name = "SMB 硬链接清理"
     plugin_desc = "通过 MoviePilot 的 SMB 连接预览或清理旧下载源文件。"
-    plugin_version = "0.2.1"
+    plugin_version = "0.3.0"
     plugin_author = "chensihui3833"
     plugin_config_prefix = "smblinkclean_"
     plugin_order = 55
@@ -201,14 +218,16 @@ class SmbLinkClean(_PluginBase):
             # 即使服务器没有报告错误，突然显示为空也可能是权限或挂载异常。
             safe_library = bool(current["library"])
             if self._config.get("enabled") and self._config.get("auto_delete") and safe_library:
-                qb_name = str(self._config.get("qb_name") or "").strip()
-                if not qb_name:
-                    raise CoordinationError("请指定联动的 QB 下载器名称")
-                qb = existing_qb(qb_name)
-                journal_scope = hashlib.sha256((scope + "\0" + qb_name).encode()).hexdigest()
+                qb_names = selected_downloaders(self._config)
+                if not qb_names:
+                    raise CoordinationError("请选择至少一个 QB 下载器")
+                bridges = {name: existing_qb(name) for name in qb_names}
+                qb = bridges[qb_names[0]] if len(qb_names) == 1 else QBFleet(bridges)
+                journal_scope = hashlib.sha256((scope + "\0" + "\0".join(qb_names)).encode()).hexdigest()
                 journal = self.get_data("qb_journal") or {"scope": journal_scope, "tasks": {}, "intents": {}}
                 if journal.get("scope") != journal_scope:
-                    if any(not task.get("removed") for task in journal.get("tasks", {}).values()):
+                    if (any(not task.get("removed") for task in journal.get("tasks", {}).values())
+                            or any(intent.get("state") == "pending" for intent in journal.get("intents", {}).values())):
                         raise CoordinationError("下载器或目录变更，原有待处理种子需要人工核对")
                     journal = {"scope": journal_scope, "tasks": {}, "intents": {}}
                 candidate_sources = {item["source"].casefold() for item in current["candidates"]}
@@ -293,14 +312,29 @@ class SmbLinkClean(_PluginBase):
                         removed_tasks, skipped)
         except Exception as error:
             # 异常可能含 SMB 路径或认证上下文，不输出异常正文。
-            self.save_data("status", {"ok": False, "error": type(error).__name__,
-                                      "removed": removed, "removed_tasks": removed_tasks,
-                                      "time": datetime.now(timezone.utc).isoformat()})
+            status = {"ok": False, "error": type(error).__name__,
+                      "removed": removed, "removed_tasks": removed_tasks,
+                      "time": datetime.now(timezone.utc).isoformat()}
+            if isinstance(error, (CoordinationError, QBUnavailable)):
+                status["detail"] = str(error)
+            self.save_data("status", status)
             logger.error("SMB 硬链接扫描失败（%s），已确认清理 %s 个，未更新快照；请检查是否部分完成", type(error).__name__, removed)
         finally:
             self._lock.release()
 
     def get_form(self):
+        try:
+            selected = selected_downloaders(self._config)
+        except CoordinationError:
+            selected = []
+        try:
+            from app.sdk.services import ServiceConfigHelper
+            options = sorted({conf.name for conf in ServiceConfigHelper.get_downloader_configs()
+                              if conf.enabled and str(conf.type or "").lower() == "qbittorrent" and conf.name})
+        except Exception:
+            logger.warning("SMB 硬链接清理：无法读取下载器列表")
+            options = []
+        options = sorted(set(options) | set(selected))
         return ([{"component": "VRow", "content": [
             {"component": "VCol", "props": {"cols": 12}, "content": [
                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
@@ -316,8 +350,10 @@ class SmbLinkClean(_PluginBase):
                 {"component": "VSwitch", "props": {"model": "run_once", "label": "保存后扫描一次"}},
             ]},
             {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [
-                {"component": "VTextField", "props": {"model": "qb_name", "label": "联动 QB 下载器名称",
-                                                     "hint": "须与 MoviePilot 下载器名称完全一致", "persistent-hint": True}},
+                {"component": "VSelect", "props": {"model": "qb_names", "label": "联动 QB 下载器",
+                                                  "items": [{"title": name, "value": name} for name in options],
+                                                  "multiple": True, "chips": True, "clearable": True,
+                                                  "hint": "仅匹配映射到已监控 SMB 目录的任务", "persistent-hint": True}},
             ]},
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                 {"component": "VTextField", "props": {"model": "interval", "label": "扫描间隔（分钟）",
@@ -327,7 +363,7 @@ class SmbLinkClean(_PluginBase):
                 {"component": "VTextarea", "props": {"model": "pairs", "label": "SMB 目录对", "rows": 3,
                                                     "hint": "每行一组：下载目录 | 媒体库目录", "persistent-hint": True}},
             ]},
-        ]}], {"enabled": False, "auto_delete": False, "run_once": False, "qb_name": "", "pairs": "", "interval": 30})
+        ]}], {"enabled": False, "auto_delete": False, "run_once": False, "qb_names": selected, "pairs": "", "interval": 30})
 
     def get_page(self):
         status = self.get_data("status") or {}
@@ -336,7 +372,8 @@ class SmbLinkClean(_PluginBase):
             text = "尚未扫描。"
         elif not status.get("ok"):
             reason = ("发现 1067 字节文件，可能是 SMB 链接或普通文件"
-                      if status.get("error") == "PossibleEncodedLinkError" else status.get("error", "未知错误"))
+                      if status.get("error") == "PossibleEncodedLinkError"
+                      else status.get("detail") or status.get("error", "未知错误"))
             text = (f"最近扫描失败（{reason}），本轮确认已清理 {status.get('removed', 0)} 个；"
                     "操作可能部分完成，请核对文件。以下是上一次成功的结果，请勿据此删除。")
         elif status.get("baseline"):

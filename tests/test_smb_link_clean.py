@@ -233,6 +233,31 @@ class SmbLinkCleanTests(unittest.TestCase):
         self.assertFalse(defaults["enabled"])
         self.assertFalse(defaults["auto_delete"])
 
+    def test_downloader_multiselect_preserves_legacy_and_does_not_revert_explicit_empty(self):
+        self.assertEqual(self.plugin.selected_downloaders({"qb_name": "群晖 QB"}), ["群晖 QB"])
+        self.assertEqual(self.plugin.selected_downloaders({"qb_name": "群晖 QB", "qb_names": []}), [])
+        self.assertEqual(self.plugin.selected_downloaders({"qb_names": ["群晖 QB", "本地 QB"]}), ["本地 QB", "群晖 QB"])
+        for invalid in ({"qb_names": "群晖 QB"}, {"qb_names": ["x", "x"]}, {"qb_names": ["a\0b"]}):
+            with self.subTest(invalid=invalid), self.assertRaises(self.plugin.CoordinationError):
+                self.plugin.selected_downloaders(invalid)
+
+    def test_form_offers_enabled_qb_choices_and_legacy_default(self):
+        service = types.ModuleType("app.sdk.services")
+        service.ServiceConfigHelper = SimpleNamespace(get_downloader_configs=lambda: [
+            SimpleNamespace(name="群晖 QB", type="qbittorrent", enabled=True),
+            SimpleNamespace(name="本地 QB", type="qbittorrent", enabled=True),
+            SimpleNamespace(name="其他", type="transmission", enabled=True),
+            SimpleNamespace(name="禁用", type="qbittorrent", enabled=False)])
+        plugin = self.plugin.SmbLinkClean()
+        plugin._config = {"qb_name": "群晖 QB"}
+        with patch.dict(sys.modules, {"app.sdk.services": service}):
+            form, defaults = plugin.get_form()
+        elements = [element for col in form[0]["content"] for element in col["content"]]
+        select = next(element for element in elements if element.get("component") == "VSelect")
+        self.assertTrue(select["props"]["multiple"])
+        self.assertEqual({item["value"] for item in select["props"]["items"]}, {"本地 QB", "群晖 QB"})
+        self.assertEqual(defaults["qb_names"], ["群晖 QB"])
+
     def test_automatic_delete_waits_for_second_scan_and_ten_minutes(self):
         class Storage:
             def _check_connection(self):
