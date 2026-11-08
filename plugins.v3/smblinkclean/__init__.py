@@ -103,7 +103,7 @@ def scan_tree(client, unc_root, logical_root, max_files=MAX_FILES):
 class SmbLinkClean(_PluginBase):
     plugin_name = "SMB 硬链接清理"
     plugin_desc = "通过 MoviePilot 的 SMB 连接预览或清理旧下载源文件。"
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     plugin_author = "chensihui3833"
     plugin_config_prefix = "smblinkclean_"
     plugin_order = 55
@@ -301,16 +301,33 @@ class SmbLinkClean(_PluginBase):
             self._lock.release()
 
     def get_form(self):
-        return ([{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-             "text": "默认只预览。自动清理会暂停匹配的 QB 种子并删除旧源文件；所有视频清理完成后删除任务并保留其余文件。"},
-            {"component": "VSwitch", "props": {"model": "enabled", "label": "启用定期扫描"}},
-            {"component": "VSwitch", "props": {"model": "auto_delete", "label": "自动清理符合条件的源文件"}},
-            {"component": "VSwitch", "props": {"model": "run_once", "label": "保存后扫描一次"}},
-            {"component": "VTextField", "props": {"model": "qb_name", "label": "联动 QB 下载器名称（与 MoviePilot 配置完全一致）"}},
-            {"component": "VTextarea", "props": {"model": "pairs", "label": "SMB 目录对，每行：下载目录|媒体库目录", "rows": 3}},
-            {"component": "VTextField", "props": {"model": "interval", "label": "定期扫描间隔（分钟，至少 10）", "type": "number"}},
-        ]}]}], {"enabled": False, "auto_delete": False, "run_once": False, "qb_name": "", "pairs": "", "interval": 30})
+        return ([{"component": "VRow", "content": [
+            {"component": "VCol", "props": {"cols": 12}, "content": [
+                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                 "text": "自动清理会暂停匹配的 QB 种子并删除旧源文件；所有视频清理完成后删除任务并保留其余文件。"},
+            ]},
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                {"component": "VSwitch", "props": {"model": "enabled", "label": "启用定期扫描"}},
+            ]},
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                {"component": "VSwitch", "props": {"model": "auto_delete", "label": "自动清理旧源文件"}},
+            ]},
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                {"component": "VSwitch", "props": {"model": "run_once", "label": "保存后扫描一次"}},
+            ]},
+            {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [
+                {"component": "VTextField", "props": {"model": "qb_name", "label": "联动 QB 下载器名称",
+                                                     "hint": "须与 MoviePilot 下载器名称完全一致", "persistent-hint": True}},
+            ]},
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                {"component": "VTextField", "props": {"model": "interval", "label": "扫描间隔（分钟）",
+                                                     "type": "number", "hint": "至少 10 分钟", "persistent-hint": True}},
+            ]},
+            {"component": "VCol", "props": {"cols": 12}, "content": [
+                {"component": "VTextarea", "props": {"model": "pairs", "label": "SMB 目录对", "rows": 3,
+                                                    "hint": "每行一组：下载目录 | 媒体库目录", "persistent-hint": True}},
+            ]},
+        ]}], {"enabled": False, "auto_delete": False, "run_once": False, "qb_name": "", "pairs": "", "interval": 30})
 
     def get_page(self):
         status = self.get_data("status") or {}
