@@ -1,4 +1,3 @@
-import hashlib
 import importlib.util
 import json
 import sys
@@ -17,7 +16,10 @@ class QualityFixTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         source = Path(self.temp.name) / "scan.py"
-        source.write_text("validated mock source")
+        source.write_text("class SearchScan:\n"
+                          "    def _prepared_batch(self, contexts, ready): return contexts, ready\n"
+                          "    def _filter(self, contexts): return contexts\n"
+                          "    def _coverage(self, key): return {key}\n")
         scan_module = types.ModuleType("app.chain.search.scan")
         scan_module.__file__ = str(source)
 
@@ -41,7 +43,8 @@ class QualityFixTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("quality_plugin_test", PLUGIN_PATH)
         self.plugin_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.plugin_module)
-        self.plugin_module.SUPPORTED_SCAN_SHA256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        self.plugin_module.SUPPORTED_METHOD_SHA256 = self.plugin_module._method_digest(source)
+        self.source = source
         self.scan = scan_module.SearchScan
         self.original = self.scan._prepared_batch
         self.plugin = self.plugin_module.QualityPriorityFix()
@@ -74,13 +77,18 @@ class QualityFixTest(unittest.TestCase):
         self.plugin.stop_service()
         self.assertIs(self.scan._prepared_batch, self.original)
 
-    def test_upgrade_rejects_patch_and_warns(self):
-        self.plugin_module.get_app_version = lambda: "v3.2.3"
+    def test_changed_critical_method_is_rejected_and_warns(self):
+        self.source.write_text(self.source.read_text().replace('return contexts, ready', 'return [], ready'))
         self.plugin.init_plugin({"enabled": True})
         self.assertFalse(self.plugin.get_state())
         self.assertIs(self.scan._prepared_batch, self.original)
         self.plugin.systemmessage.put.assert_called_once()
         self.assertEqual(self.plugin.systemmessage.put.call_args.kwargs["level"], "warning")
+
+    def test_other_code_changes_do_not_block_compatible_methods(self):
+        self.source.write_text(self.source.read_text() + "\n# unrelated upgrade\n")
+        self.plugin.init_plugin({"enabled": True})
+        self.assertTrue(self.plugin.get_state())
 
     def test_changed_function_is_not_overwritten(self):
         def other(*args):
