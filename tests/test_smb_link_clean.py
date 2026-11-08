@@ -36,6 +36,10 @@ def fake_entries(files=(), dirs=(), sizes=None):
                             is_symlink=lambda: False) for name in [*dirs, *files]]
 
 
+def cleanup_without_qb(qb, candidate, journal, save, delete_source, source_absent):
+    return {"cleaned": delete_source(lambda: True), "removed_tasks": 0}
+
+
 def snapshot(sources=None, library=None, scope="share", candidates=None):
     return {"scope": scope, "sources": sources or {}, "library": library or {}, "candidates": candidates or []}
 
@@ -255,7 +259,7 @@ class SmbLinkCleanTests(unittest.TestCase):
         modules["smbclient"] = client
         saved, deleted = {}, []
         plugin = self.plugin.SmbLinkClean()
-        plugin._config = {"source": "/源", "library": "/库", "enabled": True, "auto_delete": True}
+        plugin._config = {"source": "/源", "library": "/库", "enabled": True, "auto_delete": True, "qb_name": "群晖 QB"}
         plugin.get_data = lambda key: saved.get(key)
         plugin.save_data = lambda key, value: saved.__setitem__(key, value)
 
@@ -264,7 +268,7 @@ class SmbLinkCleanTests(unittest.TestCase):
             deleted.append((path, expected))
             return True
 
-        with patch.dict(sys.modules, modules), patch.object(self.plugin, "delete_verified", verified):
+        with patch.dict(sys.modules, modules), patch.object(self.plugin, "delete_verified", verified), patch.multiple(self.plugin, existing_qb=lambda _: object(), finalize_ready=lambda *args: 0, run_candidate=cleanup_without_qb):
             with patch.object(self.plugin.time, "monotonic", return_value=1000):
                 plugin.scan()
             client.library_ino = 20
@@ -308,7 +312,7 @@ class SmbLinkCleanTests(unittest.TestCase):
 
         saved, deleted = {}, []
         plugin = self.plugin.SmbLinkClean()
-        plugin._config = {"source": "/源", "library": "/库", "enabled": True, "auto_delete": True}
+        plugin._config = {"source": "/源", "library": "/库", "enabled": True, "auto_delete": True, "qb_name": "群晖 QB"}
         plugin.get_data = lambda key: saved.get(key)
         plugin.save_data = lambda key, value: saved.__setitem__(key, value)
 
@@ -316,7 +320,7 @@ class SmbLinkCleanTests(unittest.TestCase):
             if recheck(): deleted.append(path)
             return bool(deleted)
 
-        with patch.dict(sys.modules, modules), patch.object(self.plugin, "scan_tree", fake_scan), patch.object(self.plugin, "delete_verified", verified):
+        with patch.dict(sys.modules, modules), patch.object(self.plugin, "scan_tree", fake_scan), patch.object(self.plugin, "delete_verified", verified), patch.multiple(self.plugin, existing_qb=lambda _: object(), finalize_ready=lambda *args: 0, run_candidate=cleanup_without_qb):
             with patch.object(self.plugin.time, "monotonic", return_value=1000): plugin.scan()
             state["replacement"] = True
             with patch.object(self.plugin.time, "monotonic", return_value=1001): plugin.scan()
@@ -340,14 +344,14 @@ class SmbLinkCleanTests(unittest.TestCase):
             return {"/库/video.mkv": lib}
         saved, attempts = {}, []
         plugin = self.plugin.SmbLinkClean()
-        plugin._config = {"source": "/源", "library": "/库", "enabled": True, "auto_delete": True}
+        plugin._config = {"source": "/源", "library": "/库", "enabled": True, "auto_delete": True, "qb_name": "群晖 QB"}
         plugin.get_data = lambda key: saved.get(key)
         plugin.save_data = lambda key, value: saved.__setitem__(key, value)
         def verified(path, expected, recheck):
             attempts.append(path)
             if len(attempts) == 2: raise OSError("connection lost")
             return recheck()
-        with patch.dict(sys.modules, modules), patch.object(self.plugin, "scan_tree", fake_scan), patch.object(self.plugin, "delete_verified", verified):
+        with patch.dict(sys.modules, modules), patch.object(self.plugin, "scan_tree", fake_scan), patch.object(self.plugin, "delete_verified", verified), patch.multiple(self.plugin, existing_qb=lambda _: object(), finalize_ready=lambda *args: 0, run_candidate=cleanup_without_qb):
             with patch.object(self.plugin.time, "monotonic", return_value=1000): plugin.scan()
             state["replacement"] = True
             with patch.object(self.plugin.time, "monotonic", return_value=1001): plugin.scan()
@@ -387,7 +391,7 @@ class SmbLinkCleanTests(unittest.TestCase):
         modules.update({"app.modules.filemanager.storages.smb": storage, "smbclient": client})
         saved, attempted = {}, []
         plugin = self.plugin.SmbLinkClean()
-        plugin._config = {"source": "/源", "library": "/库", "enabled": True, "auto_delete": True}
+        plugin._config = {"source": "/源", "library": "/库", "enabled": True, "auto_delete": True, "qb_name": "群晖 QB"}
         plugin.get_data = lambda key: saved.get(key)
         plugin.save_data = lambda key, value: saved.__setitem__(key, value)
 
@@ -397,7 +401,7 @@ class SmbLinkCleanTests(unittest.TestCase):
             self.assertFalse(recheck())
             return False
 
-        with patch.dict(sys.modules, modules), patch.object(self.plugin, "delete_verified", verified):
+        with patch.dict(sys.modules, modules), patch.object(self.plugin, "delete_verified", verified), patch.multiple(self.plugin, existing_qb=lambda _: object(), finalize_ready=lambda *args: 0, run_candidate=cleanup_without_qb):
             with patch.object(self.plugin.time, "monotonic", return_value=1000): plugin.scan()
             client.mode = "empty"
             with patch.object(self.plugin.time, "monotonic", return_value=1001): plugin.scan()

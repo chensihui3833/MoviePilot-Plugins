@@ -13,6 +13,8 @@ from app.runtime.log import logger
 from app.sdk.plugin.base import _PluginBase
 
 from .core import VIDEO_EXTENSIONS, calculate, file_key, identity, parse_pairs
+from .qb_bridge import existing_qb
+from .torrent_coordinator import CoordinationError, finalize_ready, run_candidate
 from .verified_delete import delete_verified
 
 MAX_FILES = 50000
@@ -101,7 +103,7 @@ def scan_tree(client, unc_root, logical_root, max_files=MAX_FILES):
 class SmbLinkClean(_PluginBase):
     plugin_name = "SMB 硬链接清理"
     plugin_desc = "通过 MoviePilot 的 SMB 连接预览或清理旧下载源文件。"
-    plugin_version = "0.1.2"
+    plugin_version = "0.2.0"
     plugin_author = "chensihui3833"
     plugin_config_prefix = "smblinkclean_"
     plugin_order = 55
@@ -110,27 +112,32 @@ class SmbLinkClean(_PluginBase):
     def __init__(self):
         super().__init__()
         self._lock = threading.Lock()
+        self._control_lock = threading.RLock()
         self._generation = 0
         self._config = {}
         self._force_baseline = False
 
     def init_plugin(self, config=None):
-        self._generation += 1
-        cfg = dict(config or {})
-        self._force_baseline = self._force_baseline or bool(cfg.get("enabled") and not self._config.get("enabled"))
-        self._config = cfg
-        if cfg.get("run_once"):
-            cfg["run_once"] = False
-            self.update_config(cfg)
+        with self._control_lock:
+            self._generation += 1
+            cfg = dict(config or {})
+            self._force_baseline = self._force_baseline or bool(cfg.get("enabled") and not self._config.get("enabled"))
+            self._config = cfg
+            once = bool(cfg.get("run_once"))
+            if once:
+                cfg["run_once"] = False
+                self.update_config(cfg)
+        if once:
             threading.Thread(target=self.scan, daemon=True).start()
 
     def get_state(self):
         return bool(self._config.get("enabled"))
 
     def stop_service(self):
-        self._generation += 1
-        self._config = {}
-        self._force_baseline = True
+        with self._control_lock:
+            self._generation += 1
+            self._config = {}
+            self._force_baseline = True
 
     def get_api(self):
         return []
@@ -151,6 +158,8 @@ class SmbLinkClean(_PluginBase):
             return
         generation = self._generation
         removed = 0
+        removed_tasks = 0
+        skipped = 0
         try:
             pairs = parse_pairs(self._config.get("pairs") or
                                 f"{self._config.get('source') or ''}|{self._config.get('library') or ''}")
@@ -192,6 +201,35 @@ class SmbLinkClean(_PluginBase):
             # 即使服务器没有报告错误，突然显示为空也可能是权限或挂载异常。
             safe_library = bool(current["library"])
             if self._config.get("enabled") and self._config.get("auto_delete") and safe_library:
+                qb_name = str(self._config.get("qb_name") or "").strip()
+                if not qb_name:
+                    raise CoordinationError("请指定联动的 QB 下载器名称")
+                qb = existing_qb(qb_name)
+                journal_scope = hashlib.sha256((scope + "\0" + qb_name).encode()).hexdigest()
+                journal = self.get_data("qb_journal") or {"scope": journal_scope, "tasks": {}, "intents": {}}
+                if journal.get("scope") != journal_scope:
+                    if any(not task.get("removed") for task in journal.get("tasks", {}).values()):
+                        raise CoordinationError("下载器或目录变更，原有待处理种子需要人工核对")
+                    journal = {"scope": journal_scope, "tasks": {}, "intents": {}}
+                candidate_sources = {item["source"].casefold() for item in current["candidates"]}
+                if any(intent.get("state") == "pending" and path.casefold() not in candidate_sources
+                       for path, intent in journal.get("intents", {}).items()):
+                    raise CoordinationError("存在未完成的清理记录，请先检查源文件及 QB 任务")
+
+                def save_journal(value):
+                    self.save_data("qb_journal", value)
+
+                def source_absent(path):
+                    if not any(path.casefold().startswith(root.casefold() + "/") for root, _ in pairs):
+                        raise CoordinationError("待核对源文件超出监控目录")
+                    parent = str(PurePosixPath(path).parent)
+                    listing = scan_tree(smbclient, storage._normalize_path(parent), parent)
+                    return path.casefold() not in listing
+
+                with self._control_lock:
+                    if generation != self._generation or not self._config.get("enabled") or not self._config.get("auto_delete"):
+                        return
+                    removed_tasks += finalize_ready(qb, journal, save_journal, source_absent)
                 for candidate in list(current["candidates"]):
                     if candidate["source_key"] not in current["sources"]:
                         continue
@@ -209,7 +247,7 @@ class SmbLinkClean(_PluginBase):
                                for _, library in pairs):
                         raise ValueError("候选媒体文件不在媒体库目录内")
 
-                    def recheck_library():
+                    def recheck_library(qb_check):
                         if generation != self._generation or not self._config.get("enabled") or not self._config.get("auto_delete"):
                             return False
                         fresh = scan_all(1)
@@ -218,13 +256,27 @@ class SmbLinkClean(_PluginBase):
                         # 复核期间可见文件减少时无法断言扫描完整，宁可跳过。
                         return (len(fresh) >= len(current["library"])
                                 and file_key(expected) not in {file_key(item) for item in fresh.values()}
-                                and file_key(expected) not in {file_key(item) for item in old_directory.values()})
+                                and file_key(expected) not in {file_key(item) for item in old_directory.values()}
+                                and qb_check()
+                                and generation == self._generation and self._config.get("enabled")
+                                and self._config.get("auto_delete"))
 
-                    if delete_verified(source_path_unc, expected, recheck_library):
+                    with self._control_lock:
+                        if generation != self._generation or not self._config.get("enabled") or not self._config.get("auto_delete"):
+                            return
+                        result = run_candidate(qb, candidate, journal, save_journal,
+                                               lambda qb_check: delete_verified(source_path_unc, expected,
+                                                                                lambda: recheck_library(qb_check)),
+                                               source_absent)
+                    removed_tasks += result["removed_tasks"]
+                    if result["cleaned"]:
                         removed += 1
                         current["sources"].pop(candidate["source_key"], None)
                         current["candidates"] = [item for item in current["candidates"]
                                                  if item["source_key"] != candidate["source_key"]]
+                    else:
+                        skipped += 1
+                        logger.warning("SMB 硬链接清理跳过候选：%s", result["reason"])
             if generation != self._generation:
                 logger.warning("SMB 硬链接预览：配置变化，结果未保存")
                 return
@@ -234,13 +286,15 @@ class SmbLinkClean(_PluginBase):
                                       "baseline": not previous or previous.get("scope") != scope or previous.get("session") != SESSION_ID,
                                       "source_count": len(current["sources"]),
                                       "library_count": len(current["library"]),
-                                      "candidate_count": len(current["candidates"]), "removed": removed})
-            logger.info("SMB 硬链接扫描完成：源文件 %s，媒体文件 %s，候选 %s，已清理 %s",
-                        len(current["sources"]), len(current["library"]), len(current["candidates"]), removed)
+                                      "candidate_count": len(current["candidates"]), "removed": removed,
+                                      "removed_tasks": removed_tasks, "skipped": skipped})
+            logger.info("SMB 硬链接扫描完成：源文件 %s，媒体文件 %s，候选 %s，已清理 %s，已删除种子 %s，跳过 %s",
+                        len(current["sources"]), len(current["library"]), len(current["candidates"]), removed,
+                        removed_tasks, skipped)
         except Exception as error:
             # 异常可能含 SMB 路径或认证上下文，不输出异常正文。
             self.save_data("status", {"ok": False, "error": type(error).__name__,
-                                      "removed": removed,
+                                      "removed": removed, "removed_tasks": removed_tasks,
                                       "time": datetime.now(timezone.utc).isoformat()})
             logger.error("SMB 硬链接扫描失败（%s），已确认清理 %s 个，未更新快照；请检查是否部分完成", type(error).__name__, removed)
         finally:
@@ -249,13 +303,14 @@ class SmbLinkClean(_PluginBase):
     def get_form(self):
         return ([{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-             "text": "默认只预览。开启自动清理后会删除下载源文件，可能影响对应 QB 做种；候选至少等待 10 分钟并复核。"},
+             "text": "默认只预览。自动清理会暂停匹配的 QB 种子并删除旧源文件；所有视频清理完成后删除任务并保留其余文件。"},
             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用定期扫描"}},
             {"component": "VSwitch", "props": {"model": "auto_delete", "label": "自动清理符合条件的源文件"}},
             {"component": "VSwitch", "props": {"model": "run_once", "label": "保存后扫描一次"}},
+            {"component": "VTextField", "props": {"model": "qb_name", "label": "联动 QB 下载器名称（与 MoviePilot 配置完全一致）"}},
             {"component": "VTextarea", "props": {"model": "pairs", "label": "SMB 目录对，每行：下载目录|媒体库目录", "rows": 3}},
             {"component": "VTextField", "props": {"model": "interval", "label": "定期扫描间隔（分钟，至少 10）", "type": "number"}},
-        ]}]}], {"enabled": False, "auto_delete": False, "run_once": False, "pairs": "", "interval": 30})
+        ]}]}], {"enabled": False, "auto_delete": False, "run_once": False, "qb_name": "", "pairs": "", "interval": 30})
 
     def get_page(self):
         status = self.get_data("status") or {}
@@ -270,8 +325,15 @@ class SmbLinkClean(_PluginBase):
         elif status.get("baseline"):
             text = "初次扫描已建立基线，没有自动删除任何文件。"
         else:
-            text = f"最近一次完整扫描：{status.get('time')}；候选 {status.get('candidate_count', 0)} 个，已清理 {status.get('removed', 0)} 个。"
+            text = (f"最近一次完整扫描：{status.get('time')}；候选 {status.get('candidate_count', 0)} 个，"
+                    f"已清理 {status.get('removed', 0)} 个，已删除种子 {status.get('removed_tasks', 0)} 个，跳过 {status.get('skipped', 0)} 个。")
         items = [{"component": "VAlert", "props": {"type": "info", "variant": "tonal"}, "text": text}]
+        journal = self.get_data("qb_journal") or {}
+        waiting = [record for record in journal.get("tasks", {}).values()
+                   if record.get("retired") and not record.get("removed")]
+        if waiting:
+            items.append({"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
+                          "text": f"有 {len(waiting)} 个已部分清理的 QB 任务等待后续处理；请检查任务是否仍暂停。"})
         for candidate in snap.get("candidates", [])[:50]:
             items.append({"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
                           "text": f"{candidate['reason']}：{candidate['library']} → 候选源文件 {candidate['source']}"})
