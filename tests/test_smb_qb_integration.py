@@ -128,5 +128,24 @@ class IntegrationTests(unittest.TestCase):
             self.assertTrue(self.qb.removed)
             self.assertEqual(self.saved["status"]["removed_tasks"], 1)
 
+    def test_unresolved_intent_blocks_other_automatic_actions_after_restart(self):
+        with patch.dict(sys.modules, self.modules), patch.object(self.plugin, "scan_tree", self.scan_tree), \
+                patch.object(self.plugin, "delete_verified", self.delete_verified), \
+                patch.object(self.plugin, "existing_qb", lambda name: self.qb):
+            with patch.object(self.plugin.time, "monotonic", return_value=1000): self.instance.scan()
+            scope = self.saved["snapshot"]["scope"]
+            import hashlib
+            journal_scope = hashlib.sha256((scope + "\0群晖 QB").encode()).hexdigest()
+            self.saved["qb_journal"] = {"scope": journal_scope,
+                "tasks": {"a" * 40: {"files": ["/源/33.mkv"], "retired": [], "removed": False}},
+                "intents": {"/源/33.mkv": {"state": "pending"}}}
+            self.instance._force_baseline = True
+            with patch.object(self.plugin.time, "monotonic", return_value=1100): self.instance.scan()
+            self.assertFalse(self.saved["status"]["ok"])
+            self.assertEqual(self.saved["status"]["error"], "CoordinationError")
+            self.assertEqual(len(self.sources), 2)
+            self.assertFalse(self.qb.paused)
+            self.assertFalse(self.qb.removed)
+
 
 if __name__ == "__main__": unittest.main()
