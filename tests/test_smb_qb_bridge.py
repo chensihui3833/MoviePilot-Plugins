@@ -158,7 +158,8 @@ class QBFleetTests(unittest.TestCase):
             deleted.append(self.path)
             return True
         candidate = {"source": self.path, "identity": {"ino": 7}}
-        outcome = coordinator.run_candidate(self.fleet, candidate, journal, lambda _: None, delete, lambda _: True)
+        outcome = coordinator.run_candidate(self.fleet, candidate, journal, lambda _: None, delete,
+                                             lambda path: path == self.path)
         self.assertTrue(outcome["cleaned"])
         self.assertEqual(deleted, [self.path])
         self.assertEqual(outcome["removed_tasks"], 0)

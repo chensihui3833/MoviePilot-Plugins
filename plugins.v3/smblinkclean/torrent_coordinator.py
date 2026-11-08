@@ -21,6 +21,18 @@ def _task_records(journal, tasks):
     return records
 
 
+def _all_sources_gone(record, source_absent):
+    """先要求有本插件清理记录，再逐项确认种子内的视频均已不存在。"""
+    files = record.get("files")
+    retired = record.get("retired") or []
+    task_decision({"files": files}, (), retired)  # 校验清单与路径
+    if not retired:
+        return False
+    if not set(retired) <= set(files):
+        raise CoordinationError("清理记录不属于种子文件清单")
+    return all(source_absent(path) for path in files)
+
+
 def run_candidate(qb, candidate, journal, save, delete_source, source_absent):
     """确认全部关联种子暂停，持久化意图，在回调中复查后清理源文件。
 
@@ -68,8 +80,7 @@ def run_candidate(qb, candidate, journal, save, delete_source, source_absent):
     removed_tasks = 0
     for task in tasks:
         record = records[task["hash"]]
-        if (task_decision(task, (), record["retired"])["may_remove"]
-                and all(source_absent(path) for path in task["files"])):
+        if _all_sources_gone(record, source_absent):
             if qb.remove(task):
                 record["removed"] = True
                 removed_tasks += 1
@@ -84,9 +95,7 @@ def finalize_ready(qb, journal, save, source_absent):
         if record.get("removed") or not record.get("files"):
             continue
         task = {"hash": tid, "files": record["files"]}
-        if not task_decision(task, (), record.get("retired", []))["may_remove"]:
-            continue
-        if not all(source_absent(path) for path in task["files"]):
+        if not _all_sources_gone(record, source_absent):
             continue
         actual = qb.get_task(tid)
         if actual is not None:

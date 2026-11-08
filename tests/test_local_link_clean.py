@@ -127,5 +127,27 @@ class LocalCleanTests(unittest.TestCase):
             self.assertEqual(self.lib33.read_bytes(), b'new version'); self.assertEqual(self.lib34.read_bytes(), b'new version')
             self.assertTrue(saved['status']['ok'])
 
+    def test_previously_missing_pack_file_does_not_block_final_torrent_removal(self):
+        instance = self.plugin.LocalLinkClean(); saved = {}
+        instance._config = {'enabled': True, 'auto_delete': True, 'qb_names': ['local QB'], 'pairs': f'{self.source}|{self.library}'}
+        instance.get_data = lambda key: deepcopy(saved.get(key))
+        instance.save_data = lambda key, value: saved.__setitem__(key, deepcopy(value))
+        # 模拟整季中 38 集从未选中或已手工清理，只有两集源文件还存在。
+        missing = [str(self.source / f'absent-{n:02d}.mkv') for n in range(1, 39)]
+        qb = FakeQB([*missing, str(self.old33), str(self.old34)])
+        with patch.object(self.plugin, 'existing_qb', lambda name: qb):
+            with patch.object(self.plugin.time, 'monotonic', return_value=1000): instance.scan()
+            self.replace(self.lib33)
+            with patch.object(self.plugin.time, 'monotonic', return_value=1001): instance.scan()
+            with patch.object(self.plugin.time, 'monotonic', return_value=1601): instance.scan()
+            self.assertFalse(self.old33.exists()); self.assertTrue(self.old34.exists())
+            self.assertTrue(qb.paused); self.assertFalse(qb.removed)
+            self.replace(self.lib34)
+            with patch.object(self.plugin.time, 'monotonic', return_value=1602): instance.scan()
+            with patch.object(self.plugin.time, 'monotonic', return_value=2202): instance.scan()
+            self.assertFalse(self.old34.exists()); self.assertTrue(qb.removed)
+            self.assertEqual(self.lib33.read_bytes(), b'new version')
+            self.assertEqual(self.lib34.read_bytes(), b'new version')
+
 
 if __name__ == '__main__': unittest.main()

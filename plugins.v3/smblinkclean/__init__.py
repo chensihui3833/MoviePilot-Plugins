@@ -120,7 +120,7 @@ def scan_tree(client, unc_root, logical_root, max_files=MAX_FILES):
 class SmbLinkClean(_PluginBase):
     plugin_name = "SMB 硬链接清理"
     plugin_desc = "通过 MoviePilot 的 SMB 连接预览或清理旧下载源文件。"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "chensihui3833"
     plugin_config_prefix = "smblinkclean_"
     plugin_order = 55

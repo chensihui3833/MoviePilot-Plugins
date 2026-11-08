@@ -60,7 +60,7 @@ class CoordinatorTests(unittest.TestCase):
 
     def test_multiepisode_stays_paused_until_all_videos_cleaned(self):
         qb = FakeQB([{"hash": "a", "files": [A, B]}])
-        first = coordinator.run_candidate(qb, candidate(A), self.journal, self.save, self.delete, lambda _: True)
+        first = coordinator.run_candidate(qb, candidate(A), self.journal, self.save, self.delete, lambda path: path == A)
         self.assertEqual(first["removed_tasks"], 0)
         self.assertIn("a", qb.paused)
         second = coordinator.run_candidate(qb, candidate(B), self.journal, self.save, self.delete, lambda _: True)
@@ -80,7 +80,7 @@ class CoordinatorTests(unittest.TestCase):
         def delete(check):
             self.assertEqual(qb.paused, {"a", "b"})
             return check()
-        result = coordinator.run_candidate(qb, candidate(A), self.journal, self.save, delete, lambda _: True)
+        result = coordinator.run_candidate(qb, candidate(A), self.journal, self.save, delete, lambda path: path == A)
         self.assertEqual(result["removed_tasks"], 1)
         self.assertEqual(qb.removed, {"a"})
         self.assertEqual(self.journal["tasks"]["b"]["retired"], [A])
@@ -127,6 +127,40 @@ class CoordinatorTests(unittest.TestCase):
         qb.tasks[0]["files"].append(B)
         with self.assertRaises(coordinator.CoordinationError):
             coordinator.finalize_ready(qb, self.journal, self.save, lambda _: True)
+        self.assertEqual(qb.removed, set())
+
+    def test_pack_with_previously_absent_files_removes_only_when_every_video_is_absent(self):
+        qb = FakeQB([{"hash": "a", "files": [A, B, C]}])
+        # C 为没有下载或更早已清理的文件；B 仍在时，种子必须保留。
+        first = coordinator.run_candidate(qb, candidate(A), self.journal, self.save, self.delete,
+                                          lambda path: path in {A, C})
+        self.assertEqual(first["removed_tasks"], 0)
+        self.assertIn("a", qb.paused)
+        second = coordinator.run_candidate(qb, candidate(B), self.journal, self.save, self.delete,
+                                           lambda path: path in {A, B, C})
+        self.assertEqual(second["removed_tasks"], 1)
+        self.assertEqual(qb.removed, {"a"})
+
+    def test_no_plugin_retirement_never_removes_an_absent_pack(self):
+        qb = FakeQB([{"hash": "a", "files": [A, B]}]); qb.paused.add("a")
+        self.journal["tasks"] = {"a": {"files": [A, B], "retired": [], "removed": False}}
+        self.assertEqual(coordinator.finalize_ready(qb, self.journal, self.save, lambda _: True), 0)
+        self.assertEqual(qb.removed, set())
+
+    def test_invalid_retired_file_never_authorizes_removal(self):
+        qb = FakeQB([{"hash": "a", "files": [A, B]}]); qb.paused.add("a")
+        self.journal["tasks"] = {"a": {"files": [A, B], "retired": [C], "removed": False}}
+        with self.assertRaises(coordinator.CoordinationError):
+            coordinator.finalize_ready(qb, self.journal, self.save, lambda _: True)
+        self.assertEqual(qb.removed, set())
+
+    def test_unreadable_source_directory_never_authorizes_removal(self):
+        qb = FakeQB([{"hash": "a", "files": [A, B]}]); qb.paused.add("a")
+        self.journal["tasks"] = {"a": {"files": [A, B], "retired": [A], "removed": False}}
+        def unavailable(path):
+            raise OSError("storage unavailable")
+        with self.assertRaises(OSError):
+            coordinator.finalize_ready(qb, self.journal, self.save, unavailable)
         self.assertEqual(qb.removed, set())
 
 

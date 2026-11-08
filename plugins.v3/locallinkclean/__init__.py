@@ -114,7 +114,7 @@ def delete_verified(path, expected, recheck):
 class LocalLinkClean(_PluginBase):
     plugin_name = "本地硬链接安全清理"
     plugin_desc = "监控本地媒体库替换，并安全联动 QB 暂停或删除种子。"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "chensihui3833"
     plugin_config_prefix = "locallinkclean_"
     plugin_order = 56
