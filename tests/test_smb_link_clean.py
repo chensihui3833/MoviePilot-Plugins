@@ -29,6 +29,13 @@ def item(ino, name="/源/Video.MKV", size=100, mtime=1000, dev=1):
     return {"dev": dev, "ino": ino, "size": size, "mtime_ns": mtime, "ctime_ns": 500, "path": name}
 
 
+def fake_entries(files=(), dirs=(), sizes=None):
+    sizes = sizes or {}
+    return [SimpleNamespace(name=name, smb_info=SimpleNamespace(file_attributes=16 if name in dirs else 0,
+                                                                end_of_file=sizes.get(name, 100)),
+                            is_symlink=lambda: False) for name in [*dirs, *files]]
+
+
 def snapshot(sources=None, library=None, scope="share", candidates=None):
     return {"scope": scope, "sources": sources or {}, "library": library or {}, "candidates": candidates or []}
 
@@ -127,6 +134,8 @@ class SmbLinkCleanTests(unittest.TestCase):
             def lstat(self, path):
                 mode = stat.S_IFLNK if path.endswith("Link.mkv") else stat.S_IFREG if path.endswith("Film.MKV") else stat.S_IFDIR
                 return SimpleNamespace(st_mode=mode, st_dev=1, st_ino=7, st_size=8, st_mtime_ns=9, st_ctime_ns=5)
+            def scandir(self, root):
+                return fake_entries(["Film.MKV", "poster.jpg"] + (["Link.mkv"] if self.linked else []))
         client = Client()
         result = self.plugin.scan_tree(client, "\\\\server\\share\\library", "/library")
         self.assertEqual(list(result), ["/library/film.mkv"])
@@ -143,11 +152,27 @@ class SmbLinkCleanTests(unittest.TestCase):
             def lstat(self, path):
                 redirect = path.endswith("redirect") or (self.linked_parent and path.endswith("parent"))
                 return SimpleNamespace(st_mode=stat.S_IFDIR, st_reparse_tag=1 if redirect else 0)
+            def scandir(self, root): return fake_entries(dirs=["redirect"])
         client = Client()
         for linked_parent in (False, True):
             client.linked_parent = linked_parent
             with self.subTest(linked_parent=linked_parent), self.assertRaises(ValueError):
                 self.plugin.scan_tree(client, "\\\\server\\share\\parent\\library", "/parent/library")
+
+    def test_smb_file_encoded_link_and_changing_listing_abort_scan(self):
+        class Client:
+            filename = "ordinary"
+            size = 1067
+            def walk(self, root, **kwargs): yield root, [], [self.filename]
+            def scandir(self, root): return fake_entries([self.filename], sizes={self.filename: self.size})
+            def lstat(self, path): return SimpleNamespace(st_mode=stat.S_IFDIR)
+        client = Client()
+        with self.assertRaises(ValueError):
+            self.plugin.scan_tree(client, "\\\\server\\share\\library", "/library")
+        client.size = 100
+        client.scandir = lambda root: fake_entries([])
+        with self.assertRaises(OSError):
+            self.plugin.scan_tree(client, "\\\\server\\share\\library", "/library")
 
     def test_complete_scans_and_disconnect_preserve_previous_snapshot(self):
         class Storage:
@@ -168,6 +193,7 @@ class SmbLinkCleanTests(unittest.TestCase):
                     return SimpleNamespace(st_mode=stat.S_IFDIR)
                 ino = self.library_ino if "\\库\\" in path else 10
                 return SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=ino, st_size=100, st_mtime_ns=1000, st_ctime_ns=500)
+            def scandir(self, root): return fake_entries(["Video.MKV"])
 
         client = Client("smbclient")
         fake_storage = types.ModuleType("app.modules.filemanager.storages.smb")
@@ -219,6 +245,7 @@ class SmbLinkCleanTests(unittest.TestCase):
                     return SimpleNamespace(st_mode=stat.S_IFDIR)
                 ino = self.library_ino if "\\库\\" in path else 10
                 return SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=ino, st_size=100, st_mtime_ns=1000, st_ctime_ns=500)
+            def scandir(self, root): return fake_entries(["Video.MKV"])
 
         client = Client("smbclient")
         fake_storage = types.ModuleType("app.modules.filemanager.storages.smb")
@@ -350,6 +377,8 @@ class SmbLinkCleanTests(unittest.TestCase):
                     return SimpleNamespace(st_mode=stat.S_IFDIR)
                 ino = 20 if "\\库\\" in path and self.mode != "baseline" else 10
                 return SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=ino, st_size=100, st_mtime_ns=1000, st_ctime_ns=500)
+            def scandir(self, root):
+                return fake_entries([] if "\\库" in root and self.mode == "empty" else ["Video.MKV"])
 
         client = Client("smbclient")
         storage = types.ModuleType("app.modules.filemanager.storages.smb")

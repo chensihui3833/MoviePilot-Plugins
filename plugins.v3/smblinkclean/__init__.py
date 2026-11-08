@@ -18,6 +18,12 @@ from .verified_delete import delete_verified
 MAX_FILES = 50000
 CONFIRM_SECONDS = 600
 SESSION_ID = uuid.uuid4().hex
+# Linux CIFS Minshall+French links can appear over SMB as regular files of this size.
+POSSIBLE_MF_SYMLINK_SIZE = 1067
+
+
+class PossibleEncodedLinkError(ValueError):
+    """固定大小的普通文件可能是某些 SMB 客户端编码的链接。"""
 
 
 def _raise_walk_error(error):
@@ -49,6 +55,20 @@ def scan_tree(client, unc_root, logical_root, max_files=MAX_FILES):
         if relative == ".." or relative.startswith("..\\") or ntpath.isabs(relative):
             raise ValueError("SMB 遍历越界")
         prefix = "" if relative == "." else relative.replace("\\", "/")
+        # 部分客户端把符号链接编码成普通文件。只检查目录项元数据，
+        # 不打开文件内容；固定长度的普通文件无法排除链接时宁可停止。
+        enumerated = set()
+        for entry in client.scandir(current):
+            info = entry.smb_info
+            if entry.name in enumerated:
+                raise ValueError("SMB 目录包含重复项目")
+            enumerated.add(entry.name)
+            if info.file_attributes & 0x400 or entry.is_symlink():
+                raise ValueError("目录含链接或疑似链接，扫描已中止")
+            if not (info.file_attributes & 0x10) and info.end_of_file == POSSIBLE_MF_SYMLINK_SIZE:
+                raise PossibleEncodedLinkError("发现 1067 字节文件，可能是 SMB 编码链接，也可能是普通文件")
+        if enumerated != set(dirs) | set(files):
+            raise OSError("SMB 目录在扫描期间发生变化")
         for name in dirs:
             if name in (".", "..") or any(c in name for c in ("/", "\\", "\x00")):
                 raise ValueError("SMB 目录名无效")
@@ -81,7 +101,7 @@ def scan_tree(client, unc_root, logical_root, max_files=MAX_FILES):
 class SmbLinkClean(_PluginBase):
     plugin_name = "SMB 硬链接清理"
     plugin_desc = "通过 MoviePilot 的 SMB 连接预览或清理旧下载源文件。"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_author = "chensihui3833"
     plugin_config_prefix = "smblinkclean_"
     plugin_order = 55
@@ -243,7 +263,9 @@ class SmbLinkClean(_PluginBase):
         if not status:
             text = "尚未扫描。"
         elif not status.get("ok"):
-            text = (f"最近扫描失败（{status.get('error', '未知错误')}），本轮确认已清理 {status.get('removed', 0)} 个；"
+            reason = ("发现 1067 字节文件，可能是 SMB 链接或普通文件"
+                      if status.get("error") == "PossibleEncodedLinkError" else status.get("error", "未知错误"))
+            text = (f"最近扫描失败（{reason}），本轮确认已清理 {status.get('removed', 0)} 个；"
                     "操作可能部分完成，请核对文件。以下是上一次成功的结果，请勿据此删除。")
         elif status.get("baseline"):
             text = "初次扫描已建立基线，没有自动删除任何文件。"
