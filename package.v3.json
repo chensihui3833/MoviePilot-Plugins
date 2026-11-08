@@ -39,7 +39,7 @@
   "SmbLinkClean": {
     "name": "SMB 硬链接清理",
     "description": "使用 MoviePilot 的 SMB 连接预览或清理已失去媒体库链接的源文件。",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "author": "chensihui3833",
     "level": 1,
     "order": 55,
@@ -48,6 +48,7 @@
     "v2": false,
     "v3": true,
     "history": {
+      "v0.1.1": "遇到符号链接或重解析点停止扫描，删除前复核原媒体目录，并改用单调时钟计算等待时间。",
       "v0.1.0": "支持 SMB 目录成对扫描、基线预览以及带等待和身份复核的可选清理。"
     }
   }

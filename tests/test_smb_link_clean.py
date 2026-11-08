@@ -1,4 +1,5 @@
 import importlib.util
+import random
 import stat
 import sys
 import types
@@ -68,6 +69,20 @@ class SmbLinkCleanTests(unittest.TestCase):
         self.assertEqual(self.core.calculate(now, snapshot({"/源/video.mkv": item(11)}, {})), [])
         self.assertEqual(self.core.calculate(now, snapshot({"/源/video.mkv": self.source}, {"/库/reappeared": item(10)})), [])
 
+    def test_randomized_candidates_never_include_a_live_library_identity(self):
+        rng = random.Random(20261108)
+        for _ in range(500):
+            sources = {f"/源/{i}": item(rng.randrange(1, 8), f"/源/{i}") for i in range(6)}
+            old_library = {f"/库/{i}": item(rng.randrange(1, 8), f"/库/{i}") for i in range(6)}
+            new_library = {f"/库/{i}": item(rng.randrange(1, 8), f"/库/{i}")
+                           for i in range(6) if rng.choice((True, False))}
+            new_sources = {path: value for path, value in sources.items() if rng.choice((True, False))}
+            candidates = self.core.calculate(snapshot(sources, old_library), snapshot(new_sources, new_library))
+            live = {self.core.file_key(value) for value in new_library.values()}
+            for candidate in candidates:
+                self.assertNotIn(self.core.file_key(candidate["identity"]), live)
+                self.assertEqual(new_sources[candidate["source_key"]], sources[candidate["source_key"]])
+
     def test_path_guards(self):
         for source, library in (("/", "/lib"), ("../x", "/lib"), ("/a/../b", "/lib"),
                                 ("/a", "/a/b"), ("/a", "/A"), ("//host/share", "/lib")):
@@ -89,27 +104,50 @@ class SmbLinkCleanTests(unittest.TestCase):
 
     def test_scan_incomplete_or_outside_scope_fails(self):
         class Client:
+            def lstat(self, path):
+                return SimpleNamespace(st_mode=stat.S_IFDIR)
             def walk(self, root, **kwargs):
                 kwargs["onerror"](OSError("disconnected"))
                 yield
         with self.assertRaises(OSError):
             self.plugin.scan_tree(Client(), "\\\\server\\share\\library", "/library")
         class Escape:
+            def lstat(self, path):
+                return SimpleNamespace(st_mode=stat.S_IFDIR)
             def walk(self, root, **kwargs):
                 yield "\\\\server\\other", [], ["x.mkv"]
         with self.assertRaises(ValueError):
             self.plugin.scan_tree(Escape(), "\\\\server\\share\\library", "/library")
 
-    def test_scan_collects_media_and_skips_symlinks(self):
+    def test_scan_collects_media_and_rejects_symlinks(self):
         class Client:
+            linked = False
             def walk(self, root, **kwargs):
-                yield root, [], ["Film.MKV", "poster.jpg", "Link.mkv"]
+                yield root, [], ["Film.MKV", "poster.jpg"] + (["Link.mkv"] if self.linked else [])
             def lstat(self, path):
-                mode = stat.S_IFLNK if path.endswith("Link.mkv") else stat.S_IFREG
+                mode = stat.S_IFLNK if path.endswith("Link.mkv") else stat.S_IFREG if path.endswith("Film.MKV") else stat.S_IFDIR
                 return SimpleNamespace(st_mode=mode, st_dev=1, st_ino=7, st_size=8, st_mtime_ns=9, st_ctime_ns=5)
-        result = self.plugin.scan_tree(Client(), "\\\\server\\share\\library", "/library")
+        client = Client()
+        result = self.plugin.scan_tree(client, "\\\\server\\share\\library", "/library")
         self.assertEqual(list(result), ["/library/film.mkv"])
         self.assertEqual(result["/library/film.mkv"]["path"], "/library/Film.MKV")
+        client.linked = True
+        with self.assertRaises(ValueError):
+            self.plugin.scan_tree(client, "\\\\server\\share\\library", "/library")
+
+    def test_scan_rejects_linked_parent_and_linked_child_directory(self):
+        class Client:
+            linked_parent = False
+            def walk(self, root, **kwargs):
+                yield root, ["redirect"], []
+            def lstat(self, path):
+                redirect = path.endswith("redirect") or (self.linked_parent and path.endswith("parent"))
+                return SimpleNamespace(st_mode=stat.S_IFDIR, st_reparse_tag=1 if redirect else 0)
+        client = Client()
+        for linked_parent in (False, True):
+            client.linked_parent = linked_parent
+            with self.subTest(linked_parent=linked_parent), self.assertRaises(ValueError):
+                self.plugin.scan_tree(client, "\\\\server\\share\\parent\\library", "/parent/library")
 
     def test_complete_scans_and_disconnect_preserve_previous_snapshot(self):
         class Storage:
@@ -126,6 +164,8 @@ class SmbLinkCleanTests(unittest.TestCase):
                     kwargs["onerror"](OSError("connection lost"))
                 yield root, [], ["Video.MKV"]
             def lstat(self, path):
+                if not path.endswith("Video.MKV"):
+                    return SimpleNamespace(st_mode=stat.S_IFDIR)
                 ino = self.library_ino if "\\库\\" in path else 10
                 return SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=ino, st_size=100, st_mtime_ns=1000, st_ctime_ns=500)
 
@@ -175,6 +215,8 @@ class SmbLinkCleanTests(unittest.TestCase):
             def walk(self, root, **kwargs):
                 yield root, [], ["Video.MKV"]
             def lstat(self, path):
+                if not path.endswith("Video.MKV"):
+                    return SimpleNamespace(st_mode=stat.S_IFDIR)
                 ino = self.library_ino if "\\库\\" in path else 10
                 return SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=ino, st_size=100, st_mtime_ns=1000, st_ctime_ns=500)
 
@@ -196,15 +238,15 @@ class SmbLinkCleanTests(unittest.TestCase):
             return True
 
         with patch.dict(sys.modules, modules), patch.object(self.plugin, "delete_verified", verified):
-            with patch.object(self.plugin.time, "time", return_value=1000):
+            with patch.object(self.plugin.time, "monotonic", return_value=1000):
                 plugin.scan()
             client.library_ino = 20
-            with patch.object(self.plugin.time, "time", return_value=1001):
+            with patch.object(self.plugin.time, "monotonic", return_value=1001):
                 plugin.scan()
-            with patch.object(self.plugin.time, "time", return_value=1599):
+            with patch.object(self.plugin.time, "monotonic", return_value=1599):
                 plugin.scan()
             self.assertEqual(deleted, [])
-            with patch.object(self.plugin.time, "time", return_value=1601):
+            with patch.object(self.plugin.time, "monotonic", return_value=1601):
                 plugin.scan()
             self.assertEqual(len(deleted), 1)
             self.assertEqual(saved["status"]["removed"], 1)
@@ -215,6 +257,78 @@ class SmbLinkCleanTests(unittest.TestCase):
         current = snapshot({"/源/video.mkv": self.source}, {})
         current["session"] = "new"
         self.assertEqual(self.core.calculate(old, current), [])
+
+    def test_unreachable_old_directory_cannot_delete_source(self):
+        class Storage:
+            def _check_connection(self): pass
+            def _normalize_path(self, path, writable=False):
+                return "\\\\server\\share" + path.replace("/", "\\")
+
+        fake_storage = types.ModuleType("app.modules.filemanager.storages.smb")
+        fake_storage.SMB = Storage
+        modules = {name: types.ModuleType(name) for name in ("app", "app.modules", "app.modules.filemanager", "app.modules.filemanager.storages", "smbclient")}
+        modules["app.modules.filemanager.storages.smb"] = fake_storage
+        source = item(10)
+        lib_old = item(10, "/库/Show/Video.MKV")
+        state = {"replacement": False}
+
+        def fake_scan(client, unc, logical, max_files=50000):
+            if logical == "/源": return {"/源/video.mkv": source}
+            if logical == "/库":
+                lib = item(20, lib_old["path"]) if state["replacement"] else lib_old
+                return {"/库/show/video.mkv": lib}
+            raise OSError("original subdirectory unavailable")
+
+        saved, deleted = {}, []
+        plugin = self.plugin.SmbLinkClean()
+        plugin._config = {"source": "/源", "library": "/库", "enabled": True, "auto_delete": True}
+        plugin.get_data = lambda key: saved.get(key)
+        plugin.save_data = lambda key, value: saved.__setitem__(key, value)
+
+        def verified(path, expected, recheck):
+            if recheck(): deleted.append(path)
+            return bool(deleted)
+
+        with patch.dict(sys.modules, modules), patch.object(self.plugin, "scan_tree", fake_scan), patch.object(self.plugin, "delete_verified", verified):
+            with patch.object(self.plugin.time, "monotonic", return_value=1000): plugin.scan()
+            state["replacement"] = True
+            with patch.object(self.plugin.time, "monotonic", return_value=1001): plugin.scan()
+            with patch.object(self.plugin.time, "monotonic", return_value=1601): plugin.scan()
+        self.assertEqual(deleted, [])
+        self.assertFalse(saved["status"]["ok"])
+
+    def test_partial_failure_reports_confirmed_deletions(self):
+        class Storage:
+            def _check_connection(self): pass
+            def _normalize_path(self, path, writable=False): return "\\\\server\\share" + path.replace("/", "\\")
+        fake_storage = types.ModuleType("app.modules.filemanager.storages.smb")
+        fake_storage.SMB = Storage
+        modules = {name: types.ModuleType(name) for name in ("app", "app.modules", "app.modules.filemanager", "app.modules.filemanager.storages", "smbclient")}
+        modules["app.modules.filemanager.storages.smb"] = fake_storage
+        a, b = item(10, "/源/A.mkv"), item(10, "/源/B.mkv")
+        state = {"replacement": False}
+        def fake_scan(client, unc, logical, max_files=50000):
+            if logical == "/源": return {"/源/a.mkv": a, "/源/b.mkv": b}
+            lib = item(20 if state["replacement"] else 10, "/库/Video.MKV")
+            return {"/库/video.mkv": lib}
+        saved, attempts = {}, []
+        plugin = self.plugin.SmbLinkClean()
+        plugin._config = {"source": "/源", "library": "/库", "enabled": True, "auto_delete": True}
+        plugin.get_data = lambda key: saved.get(key)
+        plugin.save_data = lambda key, value: saved.__setitem__(key, value)
+        def verified(path, expected, recheck):
+            attempts.append(path)
+            if len(attempts) == 2: raise OSError("connection lost")
+            return recheck()
+        with patch.dict(sys.modules, modules), patch.object(self.plugin, "scan_tree", fake_scan), patch.object(self.plugin, "delete_verified", verified):
+            with patch.object(self.plugin.time, "monotonic", return_value=1000): plugin.scan()
+            state["replacement"] = True
+            with patch.object(self.plugin.time, "monotonic", return_value=1001): plugin.scan()
+            with patch.object(self.plugin.time, "monotonic", return_value=1601): plugin.scan()
+        self.assertEqual(len(attempts), 2)
+        self.assertFalse(saved["status"]["ok"])
+        self.assertEqual(saved["status"]["removed"], 1)
+        self.assertEqual(len(saved["snapshot"]["candidates"]), 2)
 
     def test_empty_library_or_recheck_drop_never_deletes(self):
         class Storage:
@@ -232,6 +346,8 @@ class SmbLinkCleanTests(unittest.TestCase):
                 else:
                     yield root, [], ["Video.MKV"]
             def lstat(self, path):
+                if not path.endswith("Video.MKV"):
+                    return SimpleNamespace(st_mode=stat.S_IFDIR)
                 ino = 20 if "\\库\\" in path and self.mode != "baseline" else 10
                 return SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=ino, st_size=100, st_mtime_ns=1000, st_ctime_ns=500)
 
@@ -253,14 +369,14 @@ class SmbLinkCleanTests(unittest.TestCase):
             return False
 
         with patch.dict(sys.modules, modules), patch.object(self.plugin, "delete_verified", verified):
-            with patch.object(self.plugin.time, "time", return_value=1000): plugin.scan()
+            with patch.object(self.plugin.time, "monotonic", return_value=1000): plugin.scan()
             client.mode = "empty"
-            with patch.object(self.plugin.time, "time", return_value=1001): plugin.scan()
-            with patch.object(self.plugin.time, "time", return_value=1601): plugin.scan()
+            with patch.object(self.plugin.time, "monotonic", return_value=1001): plugin.scan()
+            with patch.object(self.plugin.time, "monotonic", return_value=1601): plugin.scan()
             self.assertEqual(attempted, [])
             self.assertEqual(len(saved["snapshot"]["candidates"]), 1)
             client.mode = "replacement"
-            with patch.object(self.plugin.time, "time", return_value=1602): plugin.scan()
+            with patch.object(self.plugin.time, "monotonic", return_value=1602): plugin.scan()
             self.assertEqual(len(attempted), 1)
             self.assertEqual(saved["status"]["removed"], 0)
 

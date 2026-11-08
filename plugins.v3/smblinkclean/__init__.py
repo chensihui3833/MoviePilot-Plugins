@@ -24,16 +24,38 @@ def _raise_walk_error(error):
     raise error
 
 
+def _reject_redirect(info):
+    # SMB 其他重解析点也可能指向扫描范围以外，并非只有 UNIX 符号链接。
+    if (stat.S_ISLNK(info.st_mode) or getattr(info, "st_reparse_tag", 0)
+            or getattr(info, "st_file_attributes", 0) & 0x400):
+        raise ValueError("目录或视频文件含符号链接或重解析点，扫描已中止")
+
+
 def scan_tree(client, unc_root, logical_root, max_files=MAX_FILES):
     """完整遍历共享目录；任何读取错误都使整轮结果无效。"""
     result = {}
     seen_root = False
+    share, tail = ntpath.splitdrive(unc_root)
+    path = share + "\\"
+    for part in tail.strip("\\").split("\\"):
+        path = ntpath.join(path, part)
+        info = client.lstat(path)
+        _reject_redirect(info)
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("SMB 监控路径不是普通目录")
     for current, dirs, files in client.walk(unc_root, onerror=_raise_walk_error, follow_symlinks=False):
         seen_root = True
         relative = ntpath.relpath(current, unc_root)
         if relative == ".." or relative.startswith("..\\") or ntpath.isabs(relative):
             raise ValueError("SMB 遍历越界")
         prefix = "" if relative == "." else relative.replace("\\", "/")
+        for name in dirs:
+            if name in (".", "..") or any(c in name for c in ("/", "\\", "\x00")):
+                raise ValueError("SMB 目录名无效")
+            info = client.lstat(ntpath.join(current, name))
+            _reject_redirect(info)
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError("SMB 目录在扫描时发生变化")
         for name in files:
             if name in (".", "..") or any(c in name for c in ("/", "\\", "\x00")):
                 raise ValueError("SMB 文件名无效")
@@ -41,8 +63,9 @@ def scan_tree(client, unc_root, logical_root, max_files=MAX_FILES):
                 continue
             remote_path = ntpath.join(current, name)
             info = client.lstat(remote_path)
+            _reject_redirect(info)
             if not stat.S_ISREG(info.st_mode):
-                continue
+                raise ValueError("视频文件在扫描时发生变化")
             path = str(PurePosixPath(logical_root) / prefix / name)
             key = path.casefold()
             if key in result:
@@ -58,7 +81,7 @@ def scan_tree(client, unc_root, logical_root, max_files=MAX_FILES):
 class SmbLinkClean(_PluginBase):
     plugin_name = "SMB 硬链接清理"
     plugin_desc = "通过 MoviePilot 的 SMB 连接预览或清理旧下载源文件。"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "chensihui3833"
     plugin_config_prefix = "smblinkclean_"
     plugin_order = 55
@@ -107,6 +130,7 @@ class SmbLinkClean(_PluginBase):
             logger.warning("SMB 硬链接预览：上一次扫描尚未结束")
             return
         generation = self._generation
+        removed = 0
         try:
             pairs = parse_pairs(self._config.get("pairs") or
                                 f"{self._config.get('source') or ''}|{self._config.get('library') or ''}")
@@ -134,8 +158,9 @@ class SmbLinkClean(_PluginBase):
                     combined.update(found)
                 return combined
             sources, library = scan_all(0), scan_all(1)
+            # 同一运行会话内使用单调时钟，避免系统校时造成等待时间被跳过。
             # 等待时间从完整扫描结束后计算，不能把遍历时间算进去。
-            current = {"scope": scope, "session": SESSION_ID, "epoch": time.time(),
+            current = {"scope": scope, "session": SESSION_ID, "epoch": time.monotonic(),
                        "sources": sources, "library": library}
             if previous and previous.get("session") == SESSION_ID and current["epoch"] < previous.get("epoch", 0):
                 raise ValueError("系统时间回退，取消本轮")
@@ -144,7 +169,6 @@ class SmbLinkClean(_PluginBase):
             if generation != self._generation:
                 logger.warning("SMB 硬链接预览：扫描期间配置发生变化，结果已丢弃")
                 return
-            removed = 0
             # 即使服务器没有报告错误，突然显示为空也可能是权限或挂载异常。
             safe_library = bool(current["library"])
             if self._config.get("enabled") and self._config.get("auto_delete") and safe_library:
@@ -159,14 +183,22 @@ class SmbLinkClean(_PluginBase):
                         raise ValueError("候选源文件不在下载目录内")
                     source_path_unc = storage._normalize_path(source_path, writable=True)
                     expected = candidate["identity"]
+                    old_parent = str(PurePosixPath(candidate["library"]).parent)
+                    if not any(old_parent.casefold() == library.casefold()
+                               or old_parent.casefold().startswith(library.casefold() + "/")
+                               for _, library in pairs):
+                        raise ValueError("候选媒体文件不在媒体库目录内")
 
                     def recheck_library():
                         if generation != self._generation or not self._config.get("enabled") or not self._config.get("auto_delete"):
                             return False
                         fresh = scan_all(1)
+                        # 单独检查旧文件所在目录，避免上层枚举把失联或被隐藏的子目录当成删除。
+                        old_directory = scan_tree(smbclient, storage._normalize_path(old_parent), old_parent)
                         # 复核期间可见文件减少时无法断言扫描完整，宁可跳过。
                         return (len(fresh) >= len(current["library"])
-                                and file_key(expected) not in {file_key(item) for item in fresh.values()})
+                                and file_key(expected) not in {file_key(item) for item in fresh.values()}
+                                and file_key(expected) not in {file_key(item) for item in old_directory.values()})
 
                     if delete_verified(source_path_unc, expected, recheck_library):
                         removed += 1
@@ -188,8 +220,9 @@ class SmbLinkClean(_PluginBase):
         except Exception as error:
             # 异常可能含 SMB 路径或认证上下文，不输出异常正文。
             self.save_data("status", {"ok": False, "error": type(error).__name__,
+                                      "removed": removed,
                                       "time": datetime.now(timezone.utc).isoformat()})
-            logger.error("SMB 硬链接预览失败（%s），未更新快照", type(error).__name__)
+            logger.error("SMB 硬链接扫描失败（%s），已确认清理 %s 个，未更新快照；请检查是否部分完成", type(error).__name__, removed)
         finally:
             self._lock.release()
 
@@ -210,7 +243,8 @@ class SmbLinkClean(_PluginBase):
         if not status:
             text = "尚未扫描。"
         elif not status.get("ok"):
-            text = f"最近扫描失败（{status.get('error', '未知错误')}）；以下是上一次成功的结果，请勿据此删除。"
+            text = (f"最近扫描失败（{status.get('error', '未知错误')}），本轮确认已清理 {status.get('removed', 0)} 个；"
+                    "操作可能部分完成，请核对文件。以下是上一次成功的结果，请勿据此删除。")
         elif status.get("baseline"):
             text = "初次扫描已建立基线，没有自动删除任何文件。"
         else:
